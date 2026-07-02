@@ -137,53 +137,61 @@
           </section>
 
           <section class="panel-section">
-            <div class="section-heading compact">
-              <div>
-                <p class="eyebrow">Tuning</p>
-                <h2>语速、声调与音量</h2>
+            <details class="settings-details">
+              <summary>
+                <span>
+                  <i data-lucide="sliders-horizontal" aria-hidden="true"></i>
+                  语速、声调与音量
+                </span>
+              </summary>
+
+              <div class="settings-body">
+                <label class="range-field">
+                  <span>语速 <strong id="speechRateValue">0</strong></span>
+                  <input id="speechRate" type="range" min="-50" max="100" step="1" value="0" />
+                </label>
+
+                <label class="range-field">
+                  <span>声调 <strong id="pitchValue">0</strong></span>
+                  <input id="pitch" type="range" min="-12" max="12" step="1" value="0" />
+                </label>
+
+                <label class="range-field">
+                  <span>音量 <strong id="loudnessValue">0</strong></span>
+                  <input id="loudness" type="range" min="-50" max="100" step="1" value="0" />
+                </label>
               </div>
-            </div>
-
-            <label class="range-field">
-              <span>语速 <strong id="speechRateValue">0</strong></span>
-              <input id="speechRate" type="range" min="-50" max="100" step="1" value="0" />
-            </label>
-
-            <label class="range-field">
-              <span>声调 <strong id="pitchValue">0</strong></span>
-              <input id="pitch" type="range" min="-12" max="12" step="1" value="0" />
-            </label>
-
-            <label class="range-field">
-              <span>音量 <strong id="loudnessValue">0</strong></span>
-              <input id="loudness" type="range" min="-50" max="100" step="1" value="0" />
-            </label>
+            </details>
           </section>
 
           <section class="panel-section">
-            <div class="section-heading compact">
-              <div>
-                <p class="eyebrow">Effect</p>
-                <h2>声音效果器</h2>
+            <details class="settings-details">
+              <summary>
+                <span>
+                  <i data-lucide="audio-waveform" aria-hidden="true"></i>
+                  声音效果器
+                </span>
+              </summary>
+
+              <div class="settings-body">
+                <label class="range-field">
+                  <span>低沉 / 明亮 <strong id="effectPitchValue">0</strong></span>
+                  <input id="effectPitch" type="range" min="-100" max="100" step="1" value="0" />
+                </label>
+
+                <label class="range-field">
+                  <span>刚劲 / 柔和 <strong id="effectIntensityValue">0</strong></span>
+                  <input id="effectIntensity" type="range" min="-100" max="100" step="1" value="0" />
+                </label>
+
+                <label class="range-field">
+                  <span>浑厚 / 清脆 <strong id="effectTimbreValue">0</strong></span>
+                  <input id="effectTimbre" type="range" min="-100" max="100" step="1" value="0" />
+                </label>
+
+                <p class="microcopy">效果器仅在 MP3、WAV、FLAC 格式下提交。</p>
               </div>
-            </div>
-
-            <label class="range-field">
-              <span>低沉 / 明亮 <strong id="effectPitchValue">0</strong></span>
-              <input id="effectPitch" type="range" min="-100" max="100" step="1" value="0" />
-            </label>
-
-            <label class="range-field">
-              <span>刚劲 / 柔和 <strong id="effectIntensityValue">0</strong></span>
-              <input id="effectIntensity" type="range" min="-100" max="100" step="1" value="0" />
-            </label>
-
-            <label class="range-field">
-              <span>浑厚 / 清脆 <strong id="effectTimbreValue">0</strong></span>
-              <input id="effectTimbre" type="range" min="-100" max="100" step="1" value="0" />
-            </label>
-
-            <p class="microcopy">效果器仅在 MP3、WAV、FLAC 格式下提交。</p>
+            </details>
           </section>
 
           <section class="panel-section">
