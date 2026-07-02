@@ -183,12 +183,23 @@ const els = {
   copyUrlButton: document.querySelector("#copyUrlButton"),
   deepseekOutput: document.querySelector("#deepseekOutput"),
   deepseekCount: document.querySelector("#deepseekCount"),
-  deepseekList: document.querySelector("#deepseekList")
+  deepseekList: document.querySelector("#deepseekList"),
+  taskList: document.querySelector("#taskList"),
+  taskCount: document.querySelector("#taskCount")
+};
+
+const MAX_TASK_HISTORY = 20;
+const TASK_STATUS_LABELS = {
+  running: "运行中",
+  success: "成功",
+  error: "失败",
+  stopped: "已停止"
 };
 
 let activeRun = null;
 let latestAudioUrl = "";
 let hiddenVoiceIds = new Set();
+let tasks = [];
 
 init();
 
@@ -196,6 +207,7 @@ function init() {
   restoreSettings();
   fillVoiceOptions(localStorage.getItem("minimax.voice") || localStorage.getItem("aliyun.voice") || "");
   updateModelLabel();
+  loadTasks();
   bindEvents();
   updateTextStats();
   updateRangeLabels();
@@ -257,6 +269,7 @@ function bindEvents() {
   els.copyUrlButton.addEventListener("click", copyAudioUrl);
   els.hideVoiceButton.addEventListener("click", hideSelectedVoice);
   els.hiddenVoiceList.addEventListener("click", restoreHiddenVoice);
+  els.taskList.addEventListener("click", handleTaskListClick);
 
   [
     els.proxyUrl,
@@ -423,10 +436,26 @@ async function synthesize() {
 
   const controller = new AbortController();
   activeRun = { controller, stopped: false };
+  let currentTask = null;
 
   try {
     const proxyUrl = requireProxyUrl();
     const speaker = resolveVoice();
+    const sampleRate = Number(els.sampleRate.value);
+    const audioFormat = els.languageMode.value;
+    const ttsModel = els.ttsModel.value;
+    const voiceMeta = voices.find((voice) => voice.value === speaker);
+    const voiceLabel = voiceMeta ? `${voiceMeta.label} · ${voiceMeta.scene}` : speaker;
+
+    currentTask = createTaskRecord({
+      format: audioFormat,
+      voiceLabel,
+      voiceId: speaker,
+      model: ttsModel,
+      sampleRate,
+      textPreview: text.slice(0, 60)
+    });
+
     setStatus("running", "DeepSeek 正在添加语气词", "正在根据上下文插入 MiniMax 语气词标签。");
     setProgress(4);
 
@@ -436,11 +465,9 @@ async function synthesize() {
       throw new Error("DeepSeek 没有返回可合成的文本。");
     }
     renderDeepSeekOutput(optimizedText, optimizeResult.meta);
+    updateTaskRecord(currentTask.id, { deepseekText: optimizedText, deepseekMeta: optimizeResult.meta || null });
     setProgress(24);
 
-    const sampleRate = Number(els.sampleRate.value);
-    const audioFormat = els.languageMode.value;
-    const ttsModel = els.ttsModel.value;
     const ttsTextLength = countSynthesisText(optimizedText);
     if (ttsTextLength > MAX_MINIMAX_TTS_CHARS) {
       throw new Error(
@@ -480,6 +507,7 @@ async function synthesize() {
         if (event.type === "submitted") {
           setProgress(36);
           setStatus("running", "MiniMax 任务已提交", `任务 ID：${event.task_id || "等待返回"}`);
+          updateTaskRecord(currentTask.id, { taskId: event.task_id || null });
         }
         if (event.type === "status") {
           setProgress(48);
@@ -487,6 +515,7 @@ async function synthesize() {
         }
         if (event.type === "url") {
           setProgress(96);
+          updateTaskRecord(currentTask.id, { fileId: event.file_id || null });
         }
       }
     );
@@ -502,13 +531,20 @@ async function synthesize() {
       `已通过 ${ttsModel} 生成音频，播放器使用 Worker 解包后的音频流。`
     );
     setProgress(100);
+    updateTaskRecord(currentTask.id, { status: "success", errorMessage: null });
   } catch (error) {
     if (error.name === "AbortError" || activeRun?.stopped) {
       setStatus("warning", "已停止合成", "当前请求已取消，已生成的临时音频没有保存。");
       setProgress(0);
+      if (currentTask) {
+        updateTaskRecord(currentTask.id, { status: "stopped", errorMessage: "用户手动停止。" });
+      }
     } else {
       setStatus("error", "合成失败", toErrorMessage(error));
       setProgress(0);
+      if (currentTask) {
+        updateTaskRecord(currentTask.id, { status: "error", errorMessage: toErrorMessage(error) });
+      }
     }
   } finally {
     setBusy(false);
@@ -851,6 +887,186 @@ function saveSettings() {
   localStorage.setItem("minimax.effectIntensity", els.effectIntensity.value);
   localStorage.setItem("minimax.effectTimbre", els.effectTimbre.value);
   updateRangeLabels();
+}
+
+function loadTasks() {
+  const parsed = safeJson(localStorage.getItem("minimax.tasks") || "");
+  tasks = Array.isArray(parsed) ? parsed.slice(0, MAX_TASK_HISTORY) : [];
+  renderTaskList();
+}
+
+function persistTasks() {
+  tasks = tasks.slice(0, MAX_TASK_HISTORY);
+  localStorage.setItem("minimax.tasks", JSON.stringify(tasks));
+}
+
+function createTaskRecord(fields) {
+  const record = {
+    id: cryptoRandomId(),
+    taskId: null,
+    fileId: null,
+    format: fields.format,
+    status: "running",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    voiceLabel: fields.voiceLabel,
+    voiceId: fields.voiceId,
+    model: fields.model,
+    sampleRate: fields.sampleRate,
+    textPreview: fields.textPreview,
+    deepseekText: "",
+    deepseekMeta: null,
+    errorMessage: null
+  };
+
+  tasks.unshift(record);
+  persistTasks();
+  renderTaskList();
+  return record;
+}
+
+function updateTaskRecord(id, patch) {
+  const record = tasks.find((task) => task.id === id);
+  if (!record) {
+    return;
+  }
+
+  Object.assign(record, patch, { updatedAt: new Date().toISOString() });
+  persistTasks();
+  renderTaskList();
+}
+
+function buildAudioUrl(fileId, format) {
+  const proxyUrl = normalizeProxyUrl(els.proxyUrl.value.trim());
+  if (!proxyUrl || !fileId) {
+    return "";
+  }
+  return `${proxyUrl}/audio?file_id=${encodeURIComponent(fileId)}&format=${encodeURIComponent(format || "mp3")}`;
+}
+
+function renderTaskList() {
+  const openIds = new Set(
+    [...els.taskList.querySelectorAll("details.task-item[open]")].map((el) => el.dataset.taskId)
+  );
+
+  els.taskCount.textContent = `${tasks.length} 个任务`;
+
+  if (tasks.length === 0) {
+    els.taskList.innerHTML = '<p class="empty-note">暂无合成任务。</p>';
+    return;
+  }
+
+  els.taskList.innerHTML = tasks.map(renderTaskItem).join("");
+  els.taskList.querySelectorAll("details.task-item").forEach((el) => {
+    if (openIds.has(el.dataset.taskId)) {
+      el.open = true;
+    }
+  });
+  refreshIcons();
+}
+
+function renderTaskItem(task) {
+  const audioUrl = task.status === "success" ? buildAudioUrl(task.fileId, task.format) : "";
+  const statusLabel = TASK_STATUS_LABELS[task.status] || task.status;
+  const createdAtDisplay = formatTaskTimestamp(task.createdAt);
+
+  return `
+    <details class="settings-details task-item" data-task-id="${task.id}">
+      <summary>
+        <span>
+          <span class="task-status-dot is-${task.status}"></span>
+          ${escapeHtml(task.voiceLabel)} · ${escapeHtml(task.model)} · ${createdAtDisplay}
+        </span>
+        <strong>${escapeHtml(statusLabel)}</strong>
+      </summary>
+      <div class="settings-body task-item-body">
+        <p class="microcopy">
+          任务 ID：${escapeHtml(task.taskId || "—")} ｜ 文件 ID：${escapeHtml(task.fileId || "—")}
+        </p>
+        <p class="microcopy">原文预览：${escapeHtml(task.textPreview || "—")}</p>
+        ${task.errorMessage ? `<p class="microcopy task-error">${escapeHtml(task.errorMessage)}</p>` : ""}
+        ${
+          task.status === "running"
+            ? `<button class="button subtle" type="button" data-refresh-task="${task.id}">
+                <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                刷新状态
+              </button>`
+            : ""
+        }
+        ${audioUrl ? `<audio controls preload="none" src="${audioUrl}"></audio>` : ""}
+        ${
+          audioUrl
+            ? `<a class="button secondary" href="${audioUrl}" download="${escapeHtml(task.model)}-${task.id}.${escapeHtml(task.format)}">
+                <i data-lucide="download" aria-hidden="true"></i>
+                下载音频
+              </a>`
+            : ""
+        }
+        ${
+          task.deepseekText
+            ? `<details class="deepseek-output" open>
+                <summary>
+                  <span>DeepSeek 输出</span>
+                  <strong>${task.deepseekText.length} 字</strong>
+                </summary>
+                <div class="deepseek-list">
+                  <article class="deepseek-item">
+                    <pre class="instruction">${escapeHtml(task.deepseekText)}</pre>
+                  </article>
+                </div>
+              </details>`
+            : ""
+        }
+      </div>
+    </details>
+  `;
+}
+
+function formatTaskTimestamp(isoString) {
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function handleTaskListClick(event) {
+  const button = event.target.closest("[data-refresh-task]");
+  if (!button) {
+    return;
+  }
+  refreshTaskStatus(button.dataset.refreshTask);
+}
+
+async function refreshTaskStatus(id) {
+  const record = tasks.find((task) => task.id === id);
+  if (!record || !record.taskId) {
+    return;
+  }
+
+  try {
+    const proxyUrl = requireProxyUrl();
+    const response = await fetch(
+      `${proxyUrl}/status?task_id=${encodeURIComponent(record.taskId)}&format=${encodeURIComponent(record.format)}`
+    );
+    const payload = await safeResponseJson(response);
+    if (!response.ok) {
+      throw new Error(payload?.message || `HTTP ${response.status}`);
+    }
+
+    const normalizedStatus = String(payload.status || "").toLowerCase();
+    if (normalizedStatus === "success" && payload.file_id) {
+      updateTaskRecord(id, { status: "success", fileId: payload.file_id, errorMessage: null });
+    } else if (normalizedStatus === "failed" || normalizedStatus === "expired") {
+      updateTaskRecord(id, { status: "error", errorMessage: payload.message || "MiniMax 任务失败。" });
+    } else {
+      updateTaskRecord(id, { errorMessage: null });
+      setStatus("ready", "任务仍在处理中", `MiniMax 当前状态：${payload.status || "Processing"}`);
+    }
+  } catch (error) {
+    setStatus("error", "刷新任务状态失败", toErrorMessage(error));
+  }
 }
 
 function requireProxyUrl() {

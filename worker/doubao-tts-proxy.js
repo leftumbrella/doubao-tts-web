@@ -25,6 +25,13 @@ export default {
       return serveExtractedAudio(request, env, cors);
     }
 
+    if (requestUrl.pathname === "/status") {
+      if (request.method !== "GET") {
+        return json({ message: "Method not allowed" }, 405, cors);
+      }
+      return getTaskStatus(request, env, cors);
+    }
+
     if (request.method !== "POST") {
       return json({ message: "Method not allowed" }, 405, cors);
     }
@@ -278,6 +285,39 @@ async function serveExtractedAudio(request, env, cors) {
   }
 
   return rangedBinaryResponse(request, audio.bytes, audio.contentType, audio.filename, cors);
+}
+
+async function getTaskStatus(request, env, cors) {
+  const apiKey = cleanText(env.MINIMAX_API_KEY || env.MINIMAX_TOKEN || "");
+  if (!apiKey) {
+    return json({ message: "Proxy is missing MINIMAX_API_KEY" }, 500, cors);
+  }
+
+  const requestUrl = new URL(request.url);
+  const taskId = cleanText(requestUrl.searchParams.get("task_id") || "");
+  if (!taskId) {
+    return json({ message: "task_id is required" }, 400, cors);
+  }
+
+  const format = normalizeMiniMaxFormat(requestUrl.searchParams.get("format") || "mp3");
+  const status = await queryMiniMaxTask(apiKey, taskId);
+  const normalizedStatus = cleanText(status.status || "").toLowerCase();
+
+  const payload = {
+    status: status.status || "Unknown",
+    task_id: status.task_id || taskId,
+    file_id: status.file_id || null
+  };
+
+  if (normalizedStatus === "success" && status.file_id) {
+    payload.url = buildWorkerAudioUrl(request, status.file_id, format);
+  }
+
+  if (normalizedStatus === "failed" || normalizedStatus === "expired") {
+    payload.message = status.base_resp?.status_msg || `MiniMax task ${normalizedStatus}`;
+  }
+
+  return json(payload, 200, cors);
 }
 
 function buildMiniMaxTtsPayload({
