@@ -623,7 +623,7 @@ function extractAudioFromTar(bytes, preferredFormat) {
       if (audioExtensions.some((extension) => lowerName.endsWith(extension))) {
         entries.push({
           filename: filename.split("/").pop() || `output${preferredExt || ".wav"}`,
-          bytes: bytes.slice(dataStart, dataEnd)
+          bytes: bytes.subarray(dataStart, dataEnd)
         });
       }
     }
@@ -692,7 +692,7 @@ function rangedBinaryResponse(request, bytes, contentType, filename, cors) {
       return new Response(null, { status: 416, headers });
     }
 
-    const chunk = bytes.slice(parsed.start, parsed.end + 1);
+    const chunk = bytes.subarray(parsed.start, parsed.end + 1);
     headers.set("Content-Range", `bytes ${parsed.start}-${parsed.end}/${total}`);
     headers.set("Content-Length", String(chunk.byteLength));
     return new Response(chunk, {
