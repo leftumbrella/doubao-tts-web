@@ -239,29 +239,7 @@
             </details>
           </section>
 
-          <section class="panel-section">
-            <div class="section-heading compact">
-              <div>
-                <p class="eyebrow">Auth</p>
-                <h2>接口连接</h2>
-              </div>
-            </div>
-
-            <label class="field">
-              <span>代理地址</span>
-              <input
-                id="proxyUrl"
-                type="url"
-                placeholder="https://your-worker.example.workers.dev"
-                autocomplete="off"
-              />
-            </label>
-
-            <p class="microcopy">
-              MiniMax 异步合成必须通过 Worker 代理。DeepSeek API Key 和 MiniMax API Key 只保存在
-              Cloudflare Worker Secrets 中。
-            </p>
-          </section>
+          <input id="proxyUrl" type="hidden" />
         </aside>
       </main>
 
