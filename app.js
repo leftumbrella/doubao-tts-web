@@ -1,8 +1,7 @@
-const MAX_TEXT_LENGTH = 10000;
-const MAX_ALIYUN_TTS_CHARS = 10000;
-const TTS_MODEL = "cosyvoice-v3-plus";
+const MAX_TEXT_LENGTH = 50000;
+const MAX_MINIMAX_TTS_CHARS = 50000;
 
-const config = window.ALIYUN_TTS_CONFIG || window.DOUBAO_TTS_CONFIG || {};
+const config = window.MINIMAX_TTS_CONFIG || window.ALIYUN_TTS_CONFIG || window.DOUBAO_TTS_CONFIG || {};
 
 const doubaoVoices = [
   ["通用场景", "Vivi 2.0", "zh_female_vv_uranus_bigtts"],
@@ -115,9 +114,33 @@ const doubaoVoices = [
 ].map(([scene, label, value]) => ({ label, value, scene }));
 
 const voices = [
-  ["系统音色", "龙安洋 · 阳光大男孩", "longanyang"],
-  ["系统音色", "龙安欢 · 欢脱元气女", "longanhuan"],
-  ["自定义音色", "使用下方自定义 voice", ""]
+  ["中文普通话女声", "少女音色", "female-shaonv"],
+  ["中文普通话女声", "御姐音色", "female-yujie"],
+  ["中文普通话女声", "成熟女性音色", "female-chengshu"],
+  ["中文普通话女声", "甜美女性音色", "female-tianmei"],
+  ["中文普通话女声", "少女音色-beta", "female-shaonv-jingpin"],
+  ["中文普通话女声", "御姐音色-beta", "female-yujie-jingpin"],
+  ["中文普通话女声", "成熟女性音色-beta", "female-chengshu-jingpin"],
+  ["中文普通话女声", "甜美女性音色-beta", "female-tianmei-jingpin"],
+  ["中文普通话女声", "萌萌女童", "lovely_girl"],
+  ["中文普通话女声", "甜心小玲", "tianxin_xiaoling"],
+  ["中文普通话女声", "俏皮萌妹", "qiaopi_mengmei"],
+  ["中文普通话女声", "妩媚御姐", "wumei_yujie"],
+  ["中文普通话女声", "嗲嗲学妹", "diadia_xuemei"],
+  ["中文普通话女声", "淡雅学姐", "danya_xuejie"],
+  ["中文普通话女声", "新闻女声", "Chinese (Mandarin)_News_Anchor"],
+  ["中文普通话女声", "傲娇御姐", "Chinese (Mandarin)_Mature_Woman"],
+  ["中文普通话女声", "嚣张小姐", "Arrogant_Miss"],
+  ["中文普通话女声", "热心大婶", "Chinese (Mandarin)_Kind-hearted_Antie"],
+  ["中文普通话女声", "港普空姐", "Chinese (Mandarin)_HK_Flight_Attendant"],
+  ["中文普通话女声", "温暖闺蜜", "Chinese (Mandarin)_Warm_Bestie"],
+  ["中文普通话女声", "甜美女声", "Chinese (Mandarin)_Sweet_Lady"],
+  ["中文普通话女声", "阅历姐姐", "Chinese (Mandarin)_Wise_Women"],
+  ["中文普通话女声", "温暖少女", "Chinese (Mandarin)_Warm_Girl"],
+  ["中文普通话女声", "花甲奶奶", "Chinese (Mandarin)_Kind-hearted_Elder"],
+  ["中文普通话女声", "温柔学姐", "Chinese (Mandarin)_Gentle_Senior"],
+  ["中文普通话女声", "清脆少女", "Chinese (Mandarin)_Crisp_Girl"],
+  ["中文普通话女声", "柔和少女", "Chinese (Mandarin)_Soft_Girl"]
 ].map(([scene, label, value]) => ({ label, value, scene }));
 
 const els = {
@@ -125,13 +148,26 @@ const els = {
   pasteButton: document.querySelector("#pasteButton"),
   clearButton: document.querySelector("#clearButton"),
   voiceSelect: document.querySelector("#voiceSelect"),
-  customVoice: document.querySelector("#customVoice"),
+  hideVoiceButton: document.querySelector("#hideVoiceButton"),
+  hiddenVoiceList: document.querySelector("#hiddenVoiceList"),
+  hiddenVoiceCount: document.querySelector("#hiddenVoiceCount"),
+  pronunciationRules: document.querySelector("#pronunciationRules"),
+  ttsModel: document.querySelector("#ttsModel"),
+  currentModelLabel: document.querySelector("#currentModelLabel"),
   sampleRate: document.querySelector("#sampleRate"),
   languageMode: document.querySelector("#languageMode"),
   speechRate: document.querySelector("#speechRate"),
+  pitch: document.querySelector("#pitch"),
   loudness: document.querySelector("#loudness"),
+  effectPitch: document.querySelector("#effectPitch"),
+  effectIntensity: document.querySelector("#effectIntensity"),
+  effectTimbre: document.querySelector("#effectTimbre"),
   speechRateValue: document.querySelector("#speechRateValue"),
+  pitchValue: document.querySelector("#pitchValue"),
   loudnessValue: document.querySelector("#loudnessValue"),
+  effectPitchValue: document.querySelector("#effectPitchValue"),
+  effectIntensityValue: document.querySelector("#effectIntensityValue"),
+  effectTimbreValue: document.querySelector("#effectTimbreValue"),
   proxyUrl: document.querySelector("#proxyUrl"),
   charCount: document.querySelector("#charCount"),
   illegalCount: document.querySelector("#illegalCount"),
@@ -152,25 +188,34 @@ const els = {
 
 let activeRun = null;
 let latestAudioUrl = "";
+let hiddenVoiceIds = new Set();
 
 init();
 
 function init() {
-  fillVoiceOptions();
   restoreSettings();
+  fillVoiceOptions(localStorage.getItem("minimax.voice") || localStorage.getItem("aliyun.voice") || "");
+  updateModelLabel();
   bindEvents();
   updateTextStats();
   updateRangeLabels();
   refreshIcons();
 }
 
-function fillVoiceOptions() {
-  els.voiceSelect.innerHTML = voices
+function fillVoiceOptions(preferredValue = els.voiceSelect.value) {
+  const visibleVoices = getVisibleVoices();
+  els.voiceSelect.innerHTML = visibleVoices
     .map((voice) => {
       const label = `${voice.label} · ${voice.scene}`;
       return `<option value="${escapeHtml(voice.value)}">${escapeHtml(label)}</option>`;
     })
     .join("");
+
+  const nextValue = visibleVoices.some((voice) => voice.value === preferredValue)
+    ? preferredValue
+    : visibleVoices[0]?.value || "";
+  els.voiceSelect.value = nextValue;
+  updateVoiceManagement();
 }
 
 function restoreSettings() {
@@ -178,23 +223,29 @@ function restoreSettings() {
     localStorage.getItem(key) || (legacyKey ? localStorage.getItem(legacyKey) : "") || fallback;
   const urlProxy = new URLSearchParams(window.location.search).get("proxy");
 
-  els.proxyUrl.value = urlProxy || config.proxyUrl || get("aliyun.proxyUrl", "", "doubao.proxyUrl");
-  els.customVoice.value = get("aliyun.customVoice", "", "doubao.customVoice");
-  els.sampleRate.value = get("aliyun.sampleRate", "24000", "doubao.sampleRate");
-  els.languageMode.value = get("aliyun.format", "wav");
-  els.speechRate.value = get("aliyun.speechRate", "0", "doubao.speechRate");
-  els.loudness.value = get("aliyun.volume", "0", "doubao.loudness");
-  if (!["8000", "16000", "22050", "24000", "44100", "48000"].includes(els.sampleRate.value)) {
-    els.sampleRate.value = "24000";
+  els.proxyUrl.value = urlProxy || config.proxyUrl || get("minimax.proxyUrl", "", "aliyun.proxyUrl");
+  els.pronunciationRules.value = get("minimax.pronunciationRules", "");
+  hiddenVoiceIds = parseHiddenVoiceIds(get("minimax.hiddenVoices", ""));
+  els.ttsModel.value = get("minimax.model", "speech-2.8-turbo");
+  els.sampleRate.value = get("minimax.sampleRate", "32000", "aliyun.sampleRate");
+  els.languageMode.value = get("minimax.format", "mp3", "aliyun.format");
+  els.speechRate.value = get("minimax.speechRate", "0", "aliyun.speechRate");
+  els.pitch.value = get("minimax.pitch", "0");
+  els.loudness.value = get("minimax.volume", "0", "aliyun.volume");
+  els.effectPitch.value = get("minimax.effectPitch", "0");
+  els.effectIntensity.value = get("minimax.effectIntensity", "0");
+  els.effectTimbre.value = get("minimax.effectTimbre", "0");
+  if (!["8000", "16000", "22050", "24000", "32000", "44100"].includes(els.sampleRate.value)) {
+    els.sampleRate.value = "32000";
   }
-  if (!["wav", "mp3", "pcm"].includes(els.languageMode.value)) {
-    els.languageMode.value = "wav";
+  if (!["mp3", "wav", "flac", "pcm"].includes(els.languageMode.value)) {
+    els.languageMode.value = "mp3";
+  }
+  if (!["speech-2.8-turbo", "speech-2.8-hd"].includes(els.ttsModel.value)) {
+    els.ttsModel.value = "speech-2.8-turbo";
   }
 
-  const savedVoice = get("aliyun.voice", "", "doubao.voice");
-  if (savedVoice && voices.some((voice) => voice.value === savedVoice)) {
-    els.voiceSelect.value = savedVoice;
-  }
+  removeInvalidHiddenVoices();
 }
 
 function bindEvents() {
@@ -204,22 +255,119 @@ function bindEvents() {
   els.synthesizeButton.addEventListener("click", synthesize);
   els.stopButton.addEventListener("click", stopSynthesis);
   els.copyUrlButton.addEventListener("click", copyAudioUrl);
+  els.hideVoiceButton.addEventListener("click", hideSelectedVoice);
+  els.hiddenVoiceList.addEventListener("click", restoreHiddenVoice);
 
   [
     els.proxyUrl,
-    els.customVoice,
+    els.pronunciationRules,
+    els.ttsModel,
     els.voiceSelect,
     els.sampleRate,
     els.languageMode,
     els.speechRate,
-    els.loudness
+    els.pitch,
+    els.loudness,
+    els.effectPitch,
+    els.effectIntensity,
+    els.effectTimbre
   ].forEach((element) => {
     element.addEventListener("input", saveSettings);
     element.addEventListener("change", saveSettings);
   });
 
   els.speechRate.addEventListener("input", updateRangeLabels);
+  els.voiceSelect.addEventListener("change", updateVoiceManagement);
+  els.pitch.addEventListener("input", updateRangeLabels);
   els.loudness.addEventListener("input", updateRangeLabels);
+  els.effectPitch.addEventListener("input", updateRangeLabels);
+  els.effectIntensity.addEventListener("input", updateRangeLabels);
+  els.effectTimbre.addEventListener("input", updateRangeLabels);
+  els.ttsModel.addEventListener("change", updateModelLabel);
+}
+
+function getVisibleVoices() {
+  const visible = voices.filter((voice) => !hiddenVoiceIds.has(voice.value));
+  return visible.length > 0 ? visible : voices;
+}
+
+function parseHiddenVoiceIds(value) {
+  const parsed = safeJson(value);
+  if (!Array.isArray(parsed)) {
+    return new Set();
+  }
+
+  const validIds = new Set(voices.map((voice) => voice.value));
+  return new Set(parsed.filter((voiceId) => validIds.has(String(voiceId))));
+}
+
+function removeInvalidHiddenVoices() {
+  const validIds = new Set(voices.map((voice) => voice.value));
+  hiddenVoiceIds = new Set([...hiddenVoiceIds].filter((voiceId) => validIds.has(voiceId)));
+  if (hiddenVoiceIds.size >= voices.length) {
+    hiddenVoiceIds = new Set();
+  }
+}
+
+function hideSelectedVoice() {
+  const selectedVoice = els.voiceSelect.value;
+  const visibleVoices = getVisibleVoices();
+  if (!selectedVoice || visibleVoices.length <= 1) {
+    setStatus("warning", "至少保留一个音色", "当前只剩一个可用音色，不能继续隐藏。");
+    return;
+  }
+
+  hiddenVoiceIds.add(selectedVoice);
+  fillVoiceOptions("");
+  saveSettings();
+  setStatus("ready", "已隐藏当前音色", "该音色已移入设置里的隐藏列表，可以随时恢复。");
+}
+
+function restoreHiddenVoice(event) {
+  const button = event.target.closest("[data-restore-voice]");
+  if (!button) {
+    return;
+  }
+
+  const voiceId = button.dataset.restoreVoice;
+  hiddenVoiceIds.delete(voiceId);
+  fillVoiceOptions(voiceId);
+  saveSettings();
+  setStatus("ready", "已恢复音色", "该音色已经回到主音色列表。");
+}
+
+function updateVoiceManagement() {
+  const visibleVoices = getVisibleVoices();
+  els.hideVoiceButton.disabled = visibleVoices.length <= 1;
+  renderHiddenVoices();
+}
+
+function renderHiddenVoices() {
+  const hiddenVoices = voices.filter((voice) => hiddenVoiceIds.has(voice.value));
+  els.hiddenVoiceCount.textContent = `${hiddenVoices.length} 个隐藏`;
+
+  if (hiddenVoices.length === 0) {
+    els.hiddenVoiceList.innerHTML = '<p class="empty-note">暂无隐藏音色。</p>';
+    return;
+  }
+
+  els.hiddenVoiceList.innerHTML = hiddenVoices
+    .map(
+      (voice) => `
+        <div class="hidden-voice-row">
+          <div>
+            <strong>${escapeHtml(voice.label)}</strong>
+            <span>${escapeHtml(voice.scene)}</span>
+          </div>
+          <button class="icon-button ghost restore-voice-button" type="button" data-restore-voice="${escapeHtml(voice.value)}">
+            <i data-lucide="rotate-ccw" aria-hidden="true"></i>
+            <span>恢复</span>
+          </button>
+        </div>
+      `
+    )
+    .join("");
+  refreshIcons();
 }
 
 async function pasteFromClipboard() {
@@ -232,7 +380,7 @@ async function pasteFromClipboard() {
   try {
     const clipboardText = await navigator.clipboard.readText();
     insertAtSelection(clipboardText);
-    setStatus("ready", "已粘贴文本", "DeepSeek 会在合成前转换为完整 SSML。");
+    setStatus("ready", "已粘贴文本", "DeepSeek 会在合成前添加 MiniMax 语气词标签。");
   } catch (error) {
     els.textInput.focus();
     setStatus("warning", "剪贴板权限被浏览器拦截", "请使用系统粘贴快捷键。");
@@ -279,48 +427,64 @@ async function synthesize() {
   try {
     const proxyUrl = requireProxyUrl();
     const speaker = resolveVoice();
-    setStatus("running", "DeepSeek 正在生成 SSML", "正在将长文本转换为可直接提交 CosyVoice 的 SSML。");
+    setStatus("running", "DeepSeek 正在添加语气词", "正在根据上下文插入 MiniMax 语气词标签。");
     setProgress(4);
 
-    const optimizeResult = await optimizeSsml(proxyUrl, text, controller.signal);
-    const ssml = optimizeResult.ssml;
-    if (!ssml) {
-      throw new Error("DeepSeek 没有返回可合成的 SSML。");
+    const optimizeResult = await optimizeForMiniMax(proxyUrl, text, controller.signal);
+    const optimizedText = optimizeResult.text;
+    if (!optimizedText) {
+      throw new Error("DeepSeek 没有返回可合成的文本。");
     }
-    renderDeepSeekOutput(ssml, optimizeResult.meta);
+    renderDeepSeekOutput(optimizedText, optimizeResult.meta);
     setProgress(24);
 
     const sampleRate = Number(els.sampleRate.value);
     const audioFormat = els.languageMode.value;
-    const ttsTextLength = countSsmlText(ssml);
-    if (ttsTextLength > MAX_ALIYUN_TTS_CHARS) {
+    const ttsModel = els.ttsModel.value;
+    const ttsTextLength = countSynthesisText(optimizedText);
+    if (ttsTextLength > MAX_MINIMAX_TTS_CHARS) {
       throw new Error(
-        `阿里云 CosyVoice 长文本单次最多 ${MAX_ALIYUN_TTS_CHARS} 字符，DeepSeek 整理后正文为 ${ttsTextLength} 字符。`
+        `MiniMax 异步语音合成单次最多 ${MAX_MINIMAX_TTS_CHARS} 字符，DeepSeek 整理后正文为 ${ttsTextLength} 字符。`
       );
     }
 
     setStatus(
       "running",
-      "正在调用阿里云 CosyVoice 长文本合成",
-      `将 DeepSeek 生成的 SSML 作为 1 次请求提交，正文 ${ttsTextLength} 字符。`
+      "正在创建 MiniMax 异步语音任务",
+      `将 DeepSeek 生成的文本作为 1 次请求提交，正文 ${ttsTextLength} 字符。`
     );
     setProgress(28);
+
+    const pronunciationDict = mergePronunciationDicts(
+      optimizeResult.pronunciationDict,
+      { tone: parsePronunciationRules(els.pronunciationRules.value) }
+    );
 
     const speechResult = await streamLongText(
       proxyUrl,
       {
-        ssml,
+        text: optimizedText,
+        pronunciation_dict: pronunciationDict,
         voice: speaker,
-        model: TTS_MODEL,
+        model: ttsModel,
         format: audioFormat,
         sample_rate: sampleRate,
-        volume: mapAliyunVolume(Number(els.loudness.value)),
-        rate: mapDashScopeRate(Number(els.speechRate.value)),
-        pitch: 1,
-        enable_ssml: true
+        vol: mapMiniMaxVolume(Number(els.loudness.value)),
+        speed: mapMiniMaxSpeed(Number(els.speechRate.value)),
+        pitch: mapMiniMaxPitch(Number(els.pitch.value)),
+        voice_modify: buildVoiceModify(audioFormat),
+        language_boost: "Chinese"
       },
       controller.signal,
       (event) => {
+        if (event.type === "submitted") {
+          setProgress(36);
+          setStatus("running", "MiniMax 任务已提交", `任务 ID：${event.task_id || "等待返回"}`);
+        }
+        if (event.type === "status") {
+          setProgress(48);
+          setStatus("running", "MiniMax 正在合成", `当前状态：${event.status || "Processing"}`);
+        }
         if (event.type === "url") {
           setProgress(96);
         }
@@ -331,11 +495,11 @@ async function synthesize() {
       throw new Error("语音合成完成但没有返回音频 URL。");
     }
 
-    showAudio(speechResult.url, `${TTS_MODEL}-${Date.now()}.${audioFormat}`);
+    showAudio(speechResult.url, `${ttsModel}-${Date.now()}.${audioFormat}`);
     setStatus(
       "success",
       "合成完成",
-      `已通过 ${TTS_MODEL} 生成音频 URL，有效期约 24 小时。`
+      `已通过 ${ttsModel} 生成音频，播放器使用 Worker 解包后的音频流。`
     );
     setProgress(100);
   } catch (error) {
@@ -352,7 +516,7 @@ async function synthesize() {
   }
 }
 
-async function optimizeSsml(proxyUrl, text, signal) {
+async function optimizeForMiniMax(proxyUrl, text, signal) {
   const response = await fetch(`${proxyUrl}/optimize`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -366,7 +530,8 @@ async function optimizeSsml(proxyUrl, text, signal) {
   }
 
   return {
-    ssml: String(payload.ssml || "").trim(),
+    text: String(payload.text || payload.ssml || "").trim(),
+    pronunciationDict: payload.pronunciation_dict || { tone: [] },
     meta: payload.meta || null
   };
 }
@@ -381,7 +546,7 @@ async function streamLongText(proxyUrl, body, signal, onEvent) {
 
   if (!response.ok) {
     const payload = await safeResponseJson(response);
-    throw new Error(payload?.message || `DashScope CosyVoice request failed: HTTP ${response.status}`);
+    throw new Error(payload?.message || `MiniMax TTS request failed: HTTP ${response.status}`);
   }
 
   if (!response.body) {
@@ -411,7 +576,7 @@ async function streamLongText(proxyUrl, body, signal, onEvent) {
       const event = safeJson(line);
       if (!event) continue;
       if (event.type === "error") {
-        throw new Error(event.message || "DashScope CosyVoice returned an error.");
+        throw new Error(event.message || "MiniMax TTS returned an error.");
       }
       if (event.type === "url" && event.url) {
         result.url = event.url;
@@ -427,7 +592,7 @@ async function streamLongText(proxyUrl, body, signal, onEvent) {
   if (buffer.trim()) {
     const event = safeJson(buffer.trim());
     if (event?.type === "error") {
-      throw new Error(event.message || "DashScope CosyVoice returned an error.");
+      throw new Error(event.message || "MiniMax TTS returned an error.");
     }
     if (event?.type === "url" && event.url) {
       result.url = event.url;
@@ -441,11 +606,11 @@ async function streamLongText(proxyUrl, body, signal, onEvent) {
   return result;
 }
 
-function countSsmlText(ssml) {
-  return ssml.replace(/<[^>]*>/g, "").length;
+function countSynthesisText(text) {
+  return String(text || "").replace(/<[^>]*>/g, "").length;
 }
 
-function mapDashScopeRate(value) {
+function mapMiniMaxSpeed(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 1;
   if (number < 0) {
@@ -454,8 +619,71 @@ function mapDashScopeRate(value) {
   return Math.min(2, 1 + number / 100);
 }
 
-function mapAliyunVolume(value) {
-  return clampNumber(Number(value) + 50, 0, 100, 50);
+function mapMiniMaxVolume(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 1;
+  if (number < 0) {
+    return Math.max(0.1, 1 + number / 100);
+  }
+  return Math.min(10, 1 + number / 50);
+}
+
+function mapMiniMaxPitch(value) {
+  return clampNumber(value, -12, 12, 0);
+}
+
+function mapVoiceModifyValue(value) {
+  return clampNumber(value, -100, 100, 0);
+}
+
+function buildVoiceModify(format) {
+  if (!["mp3", "wav", "flac"].includes(format)) {
+    return null;
+  }
+
+  return {
+    pitch: mapVoiceModifyValue(Number(els.effectPitch.value)),
+    intensity: mapVoiceModifyValue(Number(els.effectIntensity.value)),
+    timbre: mapVoiceModifyValue(Number(els.effectTimbre.value))
+  };
+}
+
+function parsePronunciationRules(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return [];
+  }
+
+  if (text.startsWith("[")) {
+    const parsed = safeJson(text);
+    if (Array.isArray(parsed)) {
+      return normalizePronunciationRules(parsed);
+    }
+  }
+
+  return normalizePronunciationRules(text.split(/\r?\n/));
+}
+
+function normalizePronunciationRules(rules) {
+  const seen = new Set();
+  const normalized = [];
+  for (const rule of rules) {
+    const value = String(rule || "").trim();
+    if (!value || value.startsWith("#") || !value.includes("/")) {
+      continue;
+    }
+    if (seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
+}
+
+function mergePronunciationDicts(...dicts) {
+  const tone = normalizePronunciationRules(dicts.flatMap((dict) => dict?.tone || []));
+  return { tone };
 }
 
 function validateText(text) {
@@ -494,8 +722,16 @@ function countIllegalControls(text) {
 }
 
 function updateRangeLabels() {
-  els.speechRateValue.textContent = `${mapDashScopeRate(Number(els.speechRate.value)).toFixed(2)}x`;
-  els.loudnessValue.textContent = String(mapAliyunVolume(Number(els.loudness.value)));
+  els.speechRateValue.textContent = `${mapMiniMaxSpeed(Number(els.speechRate.value)).toFixed(2)}x`;
+  els.pitchValue.textContent = String(mapMiniMaxPitch(Number(els.pitch.value)));
+  els.loudnessValue.textContent = `${mapMiniMaxVolume(Number(els.loudness.value)).toFixed(2)}x`;
+  els.effectPitchValue.textContent = String(mapVoiceModifyValue(Number(els.effectPitch.value)));
+  els.effectIntensityValue.textContent = String(mapVoiceModifyValue(Number(els.effectIntensity.value)));
+  els.effectTimbreValue.textContent = String(mapVoiceModifyValue(Number(els.effectTimbre.value)));
+}
+
+function updateModelLabel() {
+  els.currentModelLabel.textContent = els.ttsModel.value;
 }
 
 function setBusy(isBusy) {
@@ -544,19 +780,18 @@ function resetDeepSeekOutput() {
   els.deepseekList.innerHTML = "";
 }
 
-function renderDeepSeekOutput(ssml, meta) {
+function renderDeepSeekOutput(text, meta) {
   els.deepseekOutput.hidden = false;
-  els.deepseekCount.textContent = `${countSsmlText(ssml)} 字`;
+  els.deepseekCount.textContent = `${countSynthesisText(text)} 字`;
   els.deepseekList.innerHTML = `
     <article class="deepseek-item">
       <div class="deepseek-meta">
-        <span>SSML</span>
+        <span>MiniMax 文本</span>
         <span>${escapeHtml(meta?.model || "deepseek")}</span>
-        <span>${escapeHtml(String(ssml.length))} 字符含标签</span>
-        <span>${escapeHtml(String(meta?.phoneme_count ?? 0))} 个读音修正</span>
-        <span>${escapeHtml(String(meta?.break_count ?? 0))} 个停顿</span>
+        <span>${escapeHtml(String(text.length))} 字符</span>
+        <span>${escapeHtml(String(meta?.paralinguistic_count ?? 0))} 个语气词</span>
       </div>
-      <pre class="instruction">${escapeHtml(ssml)}</pre>
+      <pre class="instruction">${escapeHtml(text)}</pre>
     </article>
   `;
 }
@@ -573,7 +808,7 @@ async function copyAudioUrl() {
 
   try {
     await navigator.clipboard.writeText(latestAudioUrl);
-    setStatus("success", "已复制音频链接", "该链接由 DashScope 返回，通常 24 小时内有效。");
+    setStatus("success", "已复制音频链接", "该链接会通过 Worker 解包 MiniMax 结果包并返回音频流。");
   } catch (error) {
     setStatus("warning", "复制失败", "浏览器没有授予剪贴板权限，可以手动复制播放器地址。");
   }
@@ -602,20 +837,26 @@ function setProgress(value) {
 }
 
 function saveSettings() {
-  localStorage.setItem("aliyun.proxyUrl", els.proxyUrl.value.trim());
-  localStorage.setItem("aliyun.customVoice", els.customVoice.value.trim());
-  localStorage.setItem("aliyun.voice", els.voiceSelect.value);
-  localStorage.setItem("aliyun.sampleRate", els.sampleRate.value);
-  localStorage.setItem("aliyun.format", els.languageMode.value);
-  localStorage.setItem("aliyun.speechRate", els.speechRate.value);
-  localStorage.setItem("aliyun.volume", els.loudness.value);
+  localStorage.setItem("minimax.proxyUrl", els.proxyUrl.value.trim());
+  localStorage.setItem("minimax.pronunciationRules", els.pronunciationRules.value.trim());
+  localStorage.setItem("minimax.hiddenVoices", JSON.stringify([...hiddenVoiceIds]));
+  localStorage.setItem("minimax.model", els.ttsModel.value);
+  localStorage.setItem("minimax.voice", els.voiceSelect.value);
+  localStorage.setItem("minimax.sampleRate", els.sampleRate.value);
+  localStorage.setItem("minimax.format", els.languageMode.value);
+  localStorage.setItem("minimax.speechRate", els.speechRate.value);
+  localStorage.setItem("minimax.pitch", els.pitch.value);
+  localStorage.setItem("minimax.volume", els.loudness.value);
+  localStorage.setItem("minimax.effectPitch", els.effectPitch.value);
+  localStorage.setItem("minimax.effectIntensity", els.effectIntensity.value);
+  localStorage.setItem("minimax.effectTimbre", els.effectTimbre.value);
   updateRangeLabels();
 }
 
 function requireProxyUrl() {
   const proxyUrl = normalizeProxyUrl(els.proxyUrl.value.trim());
   if (!proxyUrl) {
-    throw new Error("阿里云长文本合成必须通过 Worker 代理调用，请填写代理地址。");
+    throw new Error("MiniMax 长文本合成必须通过 Worker 代理调用，请填写代理地址。");
   }
   return proxyUrl;
 }
@@ -626,11 +867,7 @@ function resolveVoice() {
     return selectedVoice;
   }
 
-  const customVoice = els.customVoice.value.trim();
-  if (!customVoice) {
-    throw new Error("请选择系统音色，或在“自定义 voice”中填写声音复刻/声音设计音色 ID。");
-  }
-  return customVoice;
+  throw new Error("请选择一个可用的 MiniMax 中文普通话女声音色。");
 }
 
 async function safeResponseJson(response) {
@@ -679,7 +916,7 @@ function toErrorMessage(error) {
 }
 
 function escapeHtml(value) {
-  return value
+  return String(value || "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

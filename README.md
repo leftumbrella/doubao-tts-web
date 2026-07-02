@@ -1,14 +1,16 @@
-# CosyVoice 长文本语音合成工作台
+# MiniMax 长文本语音合成工作台
 
-这是一个可以部署到 GitHub Pages 的静态网页。前端先把长文本交给 DeepSeek 转换为完整 SSML，然后把这份 SSML 作为一次阿里云 CosyVoice 长文本语音合成请求提交，最后使用阿里云返回的音频 URL 播放和下载。
+这是一个可以部署到 GitHub Pages 的静态网页。前端先把长文本交给 DeepSeek 根据上下文添加 MiniMax 语气词标签，然后通过 Cloudflare Worker 创建 MiniMax 异步语音合成任务，最后使用 MiniMax 返回的音频 URL 播放和下载。
 
 ## 功能
 
-- 长文本输入框，支持直接粘贴，单次最多 10000 字符。
-- 使用 `cosyvoice-v3-plus`，默认提供系统音色，也可填写声音复刻或声音设计的自定义 `voice`。
-- DeepSeek 生成的 SSML 会在页面底部展示。
-- TTS 使用阿里云百炼 DashScope 非实时 CosyVoice HTTP API。
-- 非流式返回音频文件 URL，有效期约 24 小时，页面支持播放和下载。
+- 长文本输入框，支持直接粘贴，单次最多 50000 字符。
+- 前端可选择 `speech-2.8-turbo` 或 `speech-2.8-hd`，默认只保留中文普通话女声系统音色。
+- 支持填写 MiniMax 自定义 `voice`，用于复刻音色或其他账号可用音色。
+- 支持在前端填写 `pronunciation_dict.tone` 读音规则，并保存在当前浏览器。
+- DeepSeek 添加语气词后的 MiniMax 文本会在页面底部展示。
+- TTS 使用 MiniMax 异步长文本语音合成 API。
+- 合成成功后返回音频文件 URL，页面支持播放和下载。
 
 ## GitHub Pages 部署
 
@@ -19,7 +21,7 @@
 
 ## Cloudflare Worker 部署
 
-前端不能直接保存 DeepSeek API Key 或 DashScope API Key，必须通过 Worker 代理。
+前端不能直接保存 DeepSeek API Key 或 MiniMax API Key，必须通过 Worker 代理。
 
 部署 Worker：
 
@@ -33,18 +35,14 @@ npx wrangler deploy worker/doubao-tts-proxy.js \
 
 ```bash
 npx wrangler secret put DEEPSEEK_API_KEY --name doubao-tts-proxy
-npx wrangler secret put DASHSCOPE_API_KEY --name doubao-tts-proxy
-npx wrangler secret put DASHSCOPE_WORKSPACE_ID --name doubao-tts-proxy
-npx wrangler secret put DASHSCOPE_TTS_MODEL --name doubao-tts-proxy
+npx wrangler secret put MINIMAX_API_KEY --name doubao-tts-proxy
 npx wrangler secret put ALLOWED_ORIGIN --name doubao-tts-proxy
 ```
 
 推荐值：
 
 ```text
-DASHSCOPE_API_KEY=你的阿里云百炼 API Key
-DASHSCOPE_WORKSPACE_ID=你的百炼业务空间 ID，可选；留空时使用 dashscope.aliyuncs.com
-DASHSCOPE_TTS_MODEL=cosyvoice-v3-plus
+MINIMAX_API_KEY=你的 MiniMax API Key
 ALLOWED_ORIGIN=https://你的用户名.github.io
 ```
 
@@ -67,7 +65,7 @@ https://leftumbrella.github.io
 部署 Worker 后，把 `config.js` 里的 `proxyUrl` 改为 Worker 地址：
 
 ```js
-window.ALIYUN_TTS_CONFIG = {
+window.MINIMAX_TTS_CONFIG = {
   proxyUrl: "https://doubao-tts-proxy.lefthhau.workers.dev"
 };
 ```
@@ -76,8 +74,9 @@ window.ALIYUN_TTS_CONFIG = {
 
 Worker 暴露两个路由：
 
-- `POST /optimize`：调用 DeepSeek，把长文本转换为可提交给 CosyVoice 的 SSML。
-- `POST /stream`：调用阿里云百炼 CosyVoice HTTP API，返回 NDJSON 格式的音频 URL 事件。
+- `POST /optimize`：调用 DeepSeek，在长文本中根据上下文插入 MiniMax 语气词标签。
+- `POST /stream`：调用 MiniMax 异步语音合成 API，轮询任务状态，成功后通过文件检索接口返回 NDJSON 格式的音频 URL 事件。
+- `GET /audio?file_id=...`：下载 MiniMax 返回的 `.tar` 结果包，解包出其中真正的音频文件，并以可在线播放的音频响应返回。
 
 ## 本地测试
 
@@ -98,10 +97,8 @@ http://localhost:5173/?proxy=http%3A%2F%2Flocalhost%3A8787
 本地 `.dev.vars` 示例：
 
 ```env
-DEEPSEEK_API_KEY=你的DeepSeek API Key
-DASHSCOPE_API_KEY=你的阿里云百炼 API Key
-DASHSCOPE_WORKSPACE_ID=你的百炼业务空间 ID，可选
-DASHSCOPE_TTS_MODEL=cosyvoice-v3-plus
+DEEPSEEK_API_KEY=你的 DeepSeek API Key
+MINIMAX_API_KEY=你的 MiniMax API Key
 ALLOWED_ORIGIN=http://localhost:5173
 ```
 

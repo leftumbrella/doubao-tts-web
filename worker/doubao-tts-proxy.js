@@ -1,8 +1,9 @@
-const DASHSCOPE_TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer";
-const DEFAULT_TTS_MODEL = "cosyvoice-v3-plus";
+const MINIMAX_API_BASE = "https://api.minimaxi.com";
 const DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
-const MAX_ALIYUN_TTS_CHARS = 10000;
+const MAX_MINIMAX_TTS_CHARS = 50000;
+const MINIMAX_POLL_INTERVAL_MS = 2000;
+const MINIMAX_MAX_POLLS = 180;
 
 export default {
   async fetch(request, env) {
@@ -13,12 +14,19 @@ export default {
       return new Response(null, { status: 204, headers: cors });
     }
 
-    if (request.method !== "POST") {
-      return json({ message: "Method not allowed" }, 405, cors);
-    }
-
     if (!isAllowedOrigin(request, env)) {
       return json({ message: "Origin is not allowed" }, 403, cors);
+    }
+
+    if (requestUrl.pathname === "/audio") {
+      if (request.method !== "GET") {
+        return json({ message: "Method not allowed" }, 405, cors);
+      }
+      return serveExtractedAudio(request, env, cors);
+    }
+
+    if (request.method !== "POST") {
+      return json({ message: "Method not allowed" }, 405, cors);
     }
 
     if (requestUrl.pathname === "/optimize") {
@@ -83,17 +91,19 @@ async function optimizeText(request, env, cors) {
   }
 
   const content = payload?.choices?.[0]?.message?.content;
-  const ssml = normalizeSsmlOutput(content, text);
+  const optimized = normalizeMiniMaxTextOutput(content, text);
 
   return json(
     {
-      ssml,
+      text: optimized.text,
+      ssml: optimized.text,
+      pronunciation_dict: { tone: optimized.pronunciationRules },
       meta: {
         source: "deepseek",
         model: payload?.model || env.DEEPSEEK_MODEL || DEFAULT_DEEPSEEK_MODEL,
-        text_length: countSynthesisText(ssml),
-        phoneme_count: countTag(ssml, "phoneme"),
-        break_count: countTag(ssml, "break"),
+        text_length: countSynthesisText(optimized.text),
+        pronunciation_count: optimized.pronunciationRules.length,
+        paralinguistic_count: countMiniMaxParalinguisticTags(optimized.text),
         usage: payload?.usage || null
       }
     },
@@ -103,22 +113,23 @@ async function optimizeText(request, env, cors) {
 }
 
 async function streamTts(request, env, cors) {
-  const apiKey = cleanText(env.DASHSCOPE_API_KEY || env.ALIYUN_DASHSCOPE_API_KEY || "");
+  const apiKey = cleanText(env.MINIMAX_API_KEY || env.MINIMAX_TOKEN || "");
   if (!apiKey) {
-    return json({ message: "Proxy is missing DASHSCOPE_API_KEY" }, 500, cors);
+    return json({ message: "Proxy is missing MINIMAX_API_KEY" }, 500, cors);
   }
 
   const body = await safeRequestJson(request);
-  const text = cleanText(body.ssml || body.text || "");
+  const prepared = normalizeMiniMaxTextOutput(body.text || body.ssml || "", "");
+  const text = prepared.text;
   if (!text) {
     return json({ message: "text is required" }, 400, cors);
   }
 
   const textLength = countSynthesisText(text);
-  if (textLength > MAX_ALIYUN_TTS_CHARS) {
+  if (textLength > MAX_MINIMAX_TTS_CHARS) {
     return json(
       {
-        message: `Aliyun long-text TTS allows at most ${MAX_ALIYUN_TTS_CHARS} text characters per session. Current request has ${textLength} characters.`
+        message: `MiniMax async TTS allows at most ${MAX_MINIMAX_TTS_CHARS} text characters per request. Current request has ${textLength} characters.`
       },
       400,
       cors
@@ -129,84 +140,9 @@ async function streamTts(request, env, cors) {
   if (!voice) {
     return json(
       {
-        message: "voice is required. Select a supported system voice or provide a custom voice ID."
+        message: "voice is required. Select a MiniMax Mandarin female system voice or provide a custom voice ID."
       },
       400,
-      cors
-    );
-  }
-  const format = normalizeAliyunFormat(body.format);
-  const sampleRate = normalizeAliyunSampleRate(body.sample_rate);
-  const volume = clampNumber(body.volume, 0, 100, 50);
-  const rate = clampFloat(body.rate, 0.5, 2, 1);
-  const pitch = clampFloat(body.pitch, 0.5, 2, 1);
-  const instruction = cleanText(body.instruction || "");
-
-  const input = {
-    text,
-    voice,
-    format,
-    sample_rate: sampleRate,
-    volume,
-    rate,
-    pitch,
-    enable_ssml: body.enable_ssml !== false
-  };
-
-  if (instruction) {
-    input.instruction = instruction.slice(0, 100);
-  }
-
-  const model = cleanText(body.model || env.DASHSCOPE_TTS_MODEL || DEFAULT_TTS_MODEL);
-  const ttsUrl = buildDashScopeTtsUrl(env);
-  const upstreamResponse = await fetch(ttsUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      input
-    })
-  });
-
-  const upstreamText = await upstreamResponse.text();
-  const upstreamPayload = safeJson(upstreamText);
-  const upstreamMessage =
-    upstreamPayload?.message ||
-    upstreamPayload?.error?.message ||
-    upstreamText ||
-    `DashScope TTS request failed with HTTP ${upstreamResponse.status}`;
-  if (!upstreamResponse.ok) {
-    return json(
-      {
-        message: explainDashScopeTtsError(upstreamMessage),
-        request_id: upstreamPayload?.request_id || null,
-        code: upstreamPayload?.code || null,
-        request: {
-          model,
-          voice,
-          format,
-          sample_rate: sampleRate,
-          enable_ssml: input.enable_ssml,
-          endpoint: describeDashScopeEndpoint(ttsUrl)
-        }
-      },
-      upstreamResponse.status,
-      cors
-    );
-  }
-
-  const audio = upstreamPayload?.output?.audio || {};
-  if (!audio.url) {
-    return json(
-      {
-        message: "DashScope TTS response did not include output.audio.url",
-        request_id: upstreamPayload?.request_id || null,
-        raw: upstreamPayload || upstreamText
-      },
-      502,
       cors
     );
   }
@@ -215,123 +151,644 @@ async function streamTts(request, env, cors) {
   responseHeaders.set("Content-Type", "application/x-ndjson; charset=utf-8");
   responseHeaders.set("Cache-Control", "no-store");
 
-  return new Response(
-    [
-      { type: "start", provider: "dashscope-cosyvoice", format },
-      {
-        type: "url",
-        url: audio.url,
-        expires_at: audio.expires_at || null,
-        audio_id: audio.id || null,
-        request_id: upstreamPayload?.request_id || null,
-        usage: upstreamPayload?.usage || null,
-        format
-      },
-      { type: "done" }
-    ]
-      .map((item) => `${JSON.stringify(item)}\n`)
-      .join(""),
-    {
-      status: 200,
-      headers: responseHeaders
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (event) => {
+        controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+      };
+
+      try {
+        const model = normalizeMiniMaxModel(body.model);
+        const format = normalizeMiniMaxFormat(body.format);
+        const sampleRate = normalizeMiniMaxSampleRate(body.sample_rate, format);
+        const pronunciationRules = mergePronunciationRules(
+          prepared.pronunciationRules,
+          collectPronunciationRules(body.pronunciation_dict)
+        );
+        const requestPayload = buildMiniMaxTtsPayload({
+          ...body,
+          model,
+          text,
+          voice,
+          format,
+          sampleRate,
+          pronunciationRules
+        });
+
+        send({
+          type: "start",
+          provider: "minimax",
+          model,
+          voice,
+          format,
+          text_length: textLength,
+          pronunciation_count: pronunciationRules.length
+        });
+
+        const task = await createMiniMaxTtsTask(apiKey, requestPayload);
+        send({
+          type: "submitted",
+          task_id: task.task_id || null,
+          file_id: task.file_id || null,
+          usage: { characters: task.usage_characters || null }
+        });
+
+        const completed = await waitForMiniMaxTask(apiKey, task.task_id || task.taskId, send);
+        const fileId = completed.file_id || task.file_id;
+        if (!fileId) {
+          throw new Error("MiniMax task succeeded but did not return file_id.");
+        }
+
+        const file = await retrieveMiniMaxFile(apiKey, fileId);
+        const audioUrl = file?.download_url;
+        if (!audioUrl) {
+          throw new Error("MiniMax file retrieve response did not include file.download_url.");
+        }
+        const playableUrl = buildWorkerAudioUrl(request, file.file_id || fileId, format);
+
+        send({
+          type: "url",
+          url: playableUrl,
+          archive_url: audioUrl,
+          expires_at: null,
+          file_id: file.file_id || fileId,
+          task_id: completed.task_id || task.task_id || null,
+          filename: file.filename || null,
+          bytes: file.bytes || null,
+          usage: { characters: task.usage_characters || null },
+          format
+        });
+        send({ type: "done" });
+      } catch (error) {
+        send({
+          type: "error",
+          message: toErrorMessage(error)
+        });
+      } finally {
+        controller.close();
+      }
     }
-  );
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: responseHeaders
+  });
 }
 
-function buildDashScopeTtsUrl(env) {
-  const explicitUrl = cleanText(env.DASHSCOPE_TTS_URL || "");
-  if (explicitUrl) {
-    return explicitUrl;
+async function serveExtractedAudio(request, env, cors) {
+  const apiKey = cleanText(env.MINIMAX_API_KEY || env.MINIMAX_TOKEN || "");
+  if (!apiKey) {
+    return json({ message: "Proxy is missing MINIMAX_API_KEY" }, 500, cors);
   }
 
-  const workspaceId = cleanText(env.DASHSCOPE_WORKSPACE_ID || "");
-  if (workspaceId) {
-    return `https://${workspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer`;
+  const requestUrl = new URL(request.url);
+  const fileId = cleanText(requestUrl.searchParams.get("file_id") || "");
+  if (!fileId) {
+    return json({ message: "file_id is required" }, 400, cors);
   }
 
-  return DASHSCOPE_TTS_URL;
+  const format = normalizeMiniMaxFormat(requestUrl.searchParams.get("format") || "wav");
+  const file = await retrieveMiniMaxFile(apiKey, fileId);
+  const archiveUrl = file?.download_url;
+  if (!archiveUrl) {
+    return json({ message: "MiniMax file retrieve response did not include file.download_url" }, 502, cors);
+  }
+
+  const archiveResponse = await fetch(archiveUrl);
+  if (!archiveResponse.ok) {
+    return json(
+      { message: `MiniMax audio archive download failed: HTTP ${archiveResponse.status}` },
+      archiveResponse.status,
+      cors
+    );
+  }
+
+  const archiveBytes = new Uint8Array(await archiveResponse.arrayBuffer());
+  const audio = extractAudioFromTar(archiveBytes, format);
+  if (!audio) {
+    return json(
+      {
+        message: "MiniMax archive did not contain a playable audio file",
+        expected_format: format
+      },
+      502,
+      cors
+    );
+  }
+
+  return rangedBinaryResponse(request, audio.bytes, audio.contentType, audio.filename, cors);
 }
 
-function describeDashScopeEndpoint(url) {
-  try {
-    const parsed = new URL(url);
-    return `${parsed.origin}${parsed.pathname}`;
-  } catch (error) {
-    return "custom DashScope endpoint";
+function buildMiniMaxTtsPayload({
+  model,
+  text,
+  voice,
+  format,
+  sampleRate,
+  speed,
+  rate,
+  vol,
+  volume,
+  pitch,
+  emotion,
+  language_boost,
+  voice_modify,
+  pronunciationRules
+}) {
+  const voiceSetting = {
+    voice_id: voice,
+    speed: clampFloat(speed ?? rate, 0.5, 2, 1),
+    vol: clampFloat(vol ?? volume, 0.1, 10, 1),
+    pitch: clampNumber(pitch, -12, 12, 0)
+  };
+  const normalizedEmotion = normalizeMiniMaxEmotion(emotion);
+  if (normalizedEmotion) {
+    voiceSetting.emotion = normalizedEmotion;
+  }
+
+  const payload = {
+    model,
+    text,
+    language_boost: normalizeLanguageBoost(language_boost),
+    voice_setting: voiceSetting,
+    audio_setting: {
+      audio_sample_rate: sampleRate,
+      bitrate: 128000,
+      format,
+      channel: 2
+    },
+    aigc_watermark: false
+  };
+
+  if (pronunciationRules.length > 0) {
+    payload.pronunciation_dict = { tone: pronunciationRules };
+  }
+
+  const voiceModify = normalizeVoiceModify(voice_modify, format);
+  if (voiceModify) {
+    payload.voice_modify = voiceModify;
+  }
+
+  return payload;
+}
+
+async function createMiniMaxTtsTask(apiKey, payload) {
+  const response = await fetch(`${MINIMAX_API_BASE}/v1/t2a_async_v2`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const result = await readMiniMaxJsonResponse(response, "MiniMax create task request failed");
+  assertMiniMaxSuccess(result, "MiniMax create task failed");
+  if (!result.task_id && !result.file_id) {
+    throw new Error("MiniMax create task response did not include task_id or file_id.");
+  }
+  return result;
+}
+
+async function waitForMiniMaxTask(apiKey, taskId, send) {
+  if (!taskId) {
+    throw new Error("MiniMax create task response did not include task_id.");
+  }
+
+  for (let index = 0; index < MINIMAX_MAX_POLLS; index += 1) {
+    await sleep(MINIMAX_POLL_INTERVAL_MS);
+    const status = await queryMiniMaxTask(apiKey, taskId);
+    const normalizedStatus = cleanText(status.status || "").toLowerCase();
+    send({
+      type: "status",
+      status: status.status || "Processing",
+      task_id: status.task_id || taskId,
+      file_id: status.file_id || null
+    });
+
+    if (normalizedStatus === "success") {
+      return status;
+    }
+    if (normalizedStatus === "failed" || normalizedStatus === "expired") {
+      throw new Error(`MiniMax async TTS task ${normalizedStatus}: ${status.base_resp?.status_msg || "no detail"}`);
+    }
+  }
+
+  throw new Error("MiniMax async TTS task timed out while waiting for completion.");
+}
+
+async function queryMiniMaxTask(apiKey, taskId) {
+  const url = new URL(`${MINIMAX_API_BASE}/v1/query/t2a_async_query_v2`);
+  url.searchParams.set("task_id", taskId);
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`
+    }
+  });
+
+  const result = await readMiniMaxJsonResponse(response, "MiniMax query task request failed");
+  assertMiniMaxSuccess(result, "MiniMax query task failed");
+  return result;
+}
+
+async function retrieveMiniMaxFile(apiKey, fileId) {
+  const url = new URL(`${MINIMAX_API_BASE}/v1/files/retrieve`);
+  url.searchParams.set("file_id", fileId);
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`
+    }
+  });
+
+  const result = await readMiniMaxJsonResponse(response, "MiniMax file retrieve request failed");
+  assertMiniMaxSuccess(result, "MiniMax file retrieve failed");
+  return result.file;
+}
+
+async function readMiniMaxJsonResponse(response, fallbackMessage) {
+  const raw = await response.text();
+  const payload = safeJson(raw);
+  if (!response.ok) {
+    const message = payload?.base_resp?.status_msg || payload?.error?.message || payload?.message || raw;
+    throw new Error(`${fallbackMessage}: ${message || `HTTP ${response.status}`}`);
+  }
+  if (!payload) {
+    throw new Error(`${fallbackMessage}: response was not valid JSON`);
+  }
+  return payload;
+}
+
+function assertMiniMaxSuccess(payload, fallbackMessage) {
+  const statusCode = payload?.base_resp?.status_code;
+  if (typeof statusCode === "number" && statusCode !== 0) {
+    throw new Error(`${fallbackMessage}: ${payload.base_resp?.status_msg || `status_code ${statusCode}`}`);
   }
 }
 
-function normalizeAliyunFormat(format) {
-  const value = cleanText(format || "wav").toLowerCase();
-  return ["pcm", "wav", "mp3"].includes(value) ? value : "wav";
-}
-
-function normalizeAliyunSampleRate(sampleRate) {
-  const value = clampNumber(sampleRate, 8000, 48000, 24000);
-  return [8000, 16000, 22050, 24000, 44100, 48000].includes(value) ? value : 24000;
-}
-
-function explainDashScopeTtsError(message) {
-  const text = String(message || "");
-  if (/Engine return error code:\s*418/i.test(text)) {
-    return [
-      text,
-      "该错误通常表示 voice 参数不正确，或 voice 与 model 版本不匹配。",
-      "当前默认模型是 cosyvoice-v3-plus；请使用该模型支持的系统音色，或填写与当前账号、当前模型兼容的声音复刻/声音设计音色 ID。"
-    ].join(" ");
+function normalizeMiniMaxTextOutput(content, fallbackText) {
+  let value = stripCodeFence(String(content || "")).trim();
+  if (!value) {
+    value = cleanText(fallbackText || "");
   }
 
-  return text;
+  const firstSpeak = value.search(/<speak\b/i);
+  const lastSpeakEnd = value.toLowerCase().lastIndexOf("</speak>");
+  if (firstSpeak >= 0 && lastSpeakEnd >= firstSpeak) {
+    value = value.slice(firstSpeak, lastSpeakEnd + "</speak>".length);
+  }
+
+  const pronunciationRules = [];
+  value = value.replace(/<phoneme\b([^>]*)>([\s\S]*?)<\/phoneme>/gi, (_match, attrs, inner) => {
+    const word = cleanText(stripXmlTags(unescapeXml(inner)));
+    const ph = getXmlAttr(attrs, "ph");
+    const rule = pronunciationRuleFromPhoneme(word, ph);
+    if (rule) {
+      pronunciationRules.push(rule);
+    }
+    return word;
+  });
+
+  value = value.replace(/<sub\b([^>]*)>([\s\S]*?)<\/sub>/gi, (_match, attrs, inner) => {
+    const alias = getXmlAttr(attrs, "alias");
+    return cleanText(unescapeXml(alias || inner));
+  });
+
+  value = value.replace(/<break\b[^>]*\/?>/gi, "，");
+  value = value.replace(/<\/?speak\b[^>]*>/gi, "");
+  value = stripXmlTags(value);
+  value = unescapeXml(value);
+  value = cleanText(value);
+
+  return {
+    text: value,
+    pronunciationRules: mergePronunciationRules(pronunciationRules, requiredPronunciationRules(value))
+  };
+}
+
+function pronunciationRuleFromPhoneme(word, ph) {
+  const cleanWord = cleanText(word);
+  const syllables = cleanText(ph)
+    .split(/\s+/)
+    .map((part) => part.replace(/[()]/g, "").trim())
+    .filter(Boolean);
+  if (!cleanWord || syllables.length === 0) {
+    return "";
+  }
+
+  return `${cleanWord}/${syllables.map((syllable) => `(${syllable})`).join("")}`;
+}
+
+function requiredPronunciationRules(text) {
+  const rules = [];
+  const value = String(text || "");
+  if (value.includes("鸡巴")) {
+    rules.push("鸡巴/(ji1)(ba3)");
+  }
+  if (value.includes("屌")) {
+    rules.push("屌/(diao3)");
+  }
+  return rules;
+}
+
+function collectPronunciationRules(value) {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+  if (!Array.isArray(value.tone)) {
+    return [];
+  }
+
+  return value.tone.map((rule) => cleanText(rule)).filter(Boolean);
+}
+
+function mergePronunciationRules(...ruleGroups) {
+  const seen = new Set();
+  const result = [];
+  for (const rules of ruleGroups) {
+    for (const rule of rules || []) {
+      const normalized = cleanText(rule);
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      result.push(normalized);
+    }
+  }
+  return result;
+}
+
+function normalizeMiniMaxFormat(format) {
+  const value = cleanText(format || "mp3").toLowerCase();
+  return ["mp3", "pcm", "flac", "wav", "pcmu_raw", "pcmu_wav", "opus"].includes(value) ? value : "mp3";
+}
+
+function normalizeMiniMaxModel(model) {
+  const value = cleanText(model || "");
+  return ["speech-2.8-turbo", "speech-2.8-hd"].includes(value) ? value : "speech-2.8-turbo";
+}
+
+function normalizeVoiceModify(value, format) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  if (!["mp3", "wav", "flac"].includes(format)) {
+    return null;
+  }
+
+  return {
+    pitch: clampNumber(value.pitch, -100, 100, 0),
+    intensity: clampNumber(value.intensity, -100, 100, 0),
+    timbre: clampNumber(value.timbre, -100, 100, 0)
+  };
+}
+
+function buildWorkerAudioUrl(request, fileId, format) {
+  const url = new URL(request.url);
+  url.pathname = "/audio";
+  url.search = "";
+  url.searchParams.set("file_id", fileId);
+  url.searchParams.set("format", format);
+  return url.toString();
+}
+
+function extractAudioFromTar(bytes, preferredFormat) {
+  const preferredExt = `.${String(preferredFormat || "").toLowerCase()}`;
+  const audioExtensions = [preferredExt, ".wav", ".mp3", ".flac", ".opus", ".pcm", ".pcmu_wav", ".pcmu_raw"]
+    .filter(Boolean)
+    .filter((value, index, array) => array.indexOf(value) === index);
+  const entries = [];
+  let offset = 0;
+
+  while (offset + 512 <= bytes.byteLength) {
+    const header = bytes.subarray(offset, offset + 512);
+    if (isZeroBlock(header)) {
+      break;
+    }
+
+    const name = decodeTarString(header, 0, 100);
+    const prefix = decodeTarString(header, 345, 155);
+    const filename = prefix ? `${prefix}/${name}` : name;
+    const size = parseTarOctal(header, 124, 12);
+    const typeFlag = String.fromCharCode(header[156] || 48);
+    const dataStart = offset + 512;
+    const dataEnd = dataStart + size;
+
+    if (dataEnd > bytes.byteLength) {
+      break;
+    }
+
+    if ((typeFlag === "0" || typeFlag === "\0") && size > 0) {
+      const lowerName = filename.toLowerCase();
+      if (audioExtensions.some((extension) => lowerName.endsWith(extension))) {
+        entries.push({
+          filename: filename.split("/").pop() || `output${preferredExt || ".wav"}`,
+          bytes: bytes.slice(dataStart, dataEnd)
+        });
+      }
+    }
+
+    offset = dataStart + Math.ceil(size / 512) * 512;
+  }
+
+  const exact = entries.find((entry) => entry.filename.toLowerCase().endsWith(preferredExt));
+  const selected = exact || entries[0];
+  if (!selected) {
+    return null;
+  }
+
+  return {
+    ...selected,
+    contentType: audioContentType(selected.filename)
+  };
+}
+
+function isZeroBlock(bytes) {
+  for (const byte of bytes) {
+    if (byte !== 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function decodeTarString(bytes, start, length) {
+  const slice = bytes.subarray(start, start + length);
+  let end = slice.indexOf(0);
+  if (end < 0) {
+    end = slice.length;
+  }
+  return new TextDecoder().decode(slice.subarray(0, end)).trim();
+}
+
+function parseTarOctal(bytes, start, length) {
+  const value = decodeTarString(bytes, start, length).replace(/\0/g, "").trim();
+  const parsed = Number.parseInt(value || "0", 8);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function audioContentType(filename) {
+  const lowerName = String(filename || "").toLowerCase();
+  if (lowerName.endsWith(".wav") || lowerName.endsWith(".pcmu_wav")) return "audio/wav";
+  if (lowerName.endsWith(".mp3")) return "audio/mpeg";
+  if (lowerName.endsWith(".flac")) return "audio/flac";
+  if (lowerName.endsWith(".opus")) return "audio/ogg";
+  return "application/octet-stream";
+}
+
+function rangedBinaryResponse(request, bytes, contentType, filename, cors) {
+  const headers = new Headers(cors);
+  const total = bytes.byteLength;
+  headers.set("Content-Type", contentType);
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Cache-Control", "private, max-age=300");
+  headers.set("Content-Disposition", `inline; filename="${safeHeaderFilename(filename)}"`);
+
+  const range = request.headers.get("Range");
+  if (range) {
+    const parsed = parseRangeHeader(range, total);
+    if (!parsed) {
+      headers.set("Content-Range", `bytes */${total}`);
+      return new Response(null, { status: 416, headers });
+    }
+
+    const chunk = bytes.slice(parsed.start, parsed.end + 1);
+    headers.set("Content-Range", `bytes ${parsed.start}-${parsed.end}/${total}`);
+    headers.set("Content-Length", String(chunk.byteLength));
+    return new Response(chunk, {
+      status: 206,
+      headers
+    });
+  }
+
+  headers.set("Content-Length", String(total));
+  return new Response(bytes, {
+    status: 200,
+    headers
+  });
+}
+
+function parseRangeHeader(range, total) {
+  const match = String(range || "").match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) {
+    return null;
+  }
+
+  let start = match[1] ? Number(match[1]) : 0;
+  let end = match[2] ? Number(match[2]) : total - 1;
+
+  if (!match[1] && match[2]) {
+    const suffixLength = Number(match[2]);
+    start = Math.max(0, total - suffixLength);
+    end = total - 1;
+  }
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= total) {
+    return null;
+  }
+
+  return {
+    start,
+    end: Math.min(end, total - 1)
+  };
+}
+
+function safeHeaderFilename(filename) {
+  return String(filename || "output.wav").replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function normalizeMiniMaxSampleRate(sampleRate, format) {
+  const value = clampNumber(sampleRate, 8000, 48000, 32000);
+  if (format === "opus") {
+    return [8000, 12000, 16000, 24000, 48000].includes(value) ? value : 24000;
+  }
+  return [8000, 16000, 22050, 24000, 32000, 44100].includes(value) ? value : 32000;
+}
+
+function normalizeLanguageBoost(value) {
+  const languageBoost = cleanText(value || "");
+  return languageBoost || "Chinese";
+}
+
+function normalizeMiniMaxEmotion(value) {
+  const emotion = cleanText(value || "").toLowerCase();
+  const supported = ["happy", "sad", "angry", "fearful", "disgusted", "surprised", "calm", "fluent"];
+  return supported.includes(emotion) ? emotion : "";
 }
 
 function countSynthesisText(text) {
-  return cleanText(text.replace(/<[^>]*>/g, "")).length;
+  return cleanText(String(text || "").replace(/<[^>]*>/g, "")).length;
 }
 
-function countTag(text, tagName) {
-  const pattern = new RegExp(`<${tagName}\\b`, "gi");
+function countMiniMaxParalinguisticTags(text) {
+  const tags = [
+    "laughs",
+    "chuckle",
+    "coughs",
+    "clear-throat",
+    "groans",
+    "breath",
+    "pant",
+    "inhale",
+    "exhale",
+    "gasps",
+    "sniffs",
+    "sighs",
+    "snorts",
+    "burps",
+    "lip-smacking",
+    "humming",
+    "hissing",
+    "emm",
+    "whistles",
+    "sneezes",
+    "crying",
+    "applause"
+  ];
+  const pattern = new RegExp(`\\((${tags.join("|")})\\)`, "gi");
   return String(text || "").match(pattern)?.length || 0;
 }
 
 function optimizationSystemPrompt() {
   return [
     "你是一个专业强大的成人有声小说负责人。",
-    "你的工作是接收用户输入的长篇小说文本，并将其分段转换为对播音员录制的要求。",
-    "你需要先整体查看小说内容，并将其转换为 SSML 标记语言，不用指定 voice。",
-    "你需要注意使用 SSML 标记语言控制整体情绪、语气、停顿、语速、音高、音量、读音修正和必要的背景描述。",
-    "以下是几个好的语音表现方向示例，你需要将其转化为 SSML 能表达的 rate、pitch、volume、break、phoneme、say-as、sub 等标签，而不是把这些句子原样输出：",
-    "用低沉沙哑的语气、带着沧桑与绝望地说；",
-    "用试探性的犹豫、带点害羞又藏着温柔期待的语气说；",
-    "用颤抖沙哑、带着崩溃与绝望的哭腔，夹杂着质问与心碎的语气说；",
-    "用asmr的语气说；",
-    "使用勾引的语气性感地说；",
-    "用欲求不满地口气说；",
-    "读音纠正是硬性任务，不是可选项。你必须先在脑中扫描全文的多音字、易错字、网络词、粗俗词、外来词、角色名和不常见人名地名；命中后必须用 <phoneme alphabet=\"py\" ph=\"...\"></phoneme> 修正读音。",
-    "只添加 <break> 或只调整停顿，而没有处理命中的读音风险，属于不合格输出。不要用停顿标签冒充读音纠正。",
-    "常见必须检查的多音字包括但不限于：行、长、重、还、得、着、了、朝、差、当、处、乐、觉、转、露、薄、血、禁、强、冲、种、藏、咽、塞、省、熟、恶、角、解、数、落、尽、便、应、间、将、相、给、校、曾、单、翘、壳、颤。",
-    "常见词级修正示例：银行应标为 <phoneme alphabet=\"py\" ph=\"yin2 hang2\">银行</phoneme>；行走应标为 <phoneme alphabet=\"py\" ph=\"xing2 zou3\">行走</phoneme>；重新应标为 <phoneme alphabet=\"py\" ph=\"chong2 xin1\">重新</phoneme>；重要应标为 <phoneme alphabet=\"py\" ph=\"zhong4 yao4\">重要</phoneme>；音乐应标为 <phoneme alphabet=\"py\" ph=\"yin1 yue4\">音乐</phoneme>；快乐应标为 <phoneme alphabet=\"py\" ph=\"kuai4 le4\">快乐</phoneme>；角色应标为 <phoneme alphabet=\"py\" ph=\"jue2 se4\">角色</phoneme>；角落应标为 <phoneme alphabet=\"py\" ph=\"jiao3 luo4\">角落</phoneme>。",
-    "如果文本含有特殊粗俗字词或容易读错的字，也必须按上下文用 <phoneme> 修正读音。操被用作表示性交动作时，必须标为 <phoneme alphabet=\"py\" ph=\"cao4\">操</phoneme>；日被用作表示性交动作时，必须标为 <phoneme alphabet=\"py\" ph=\"ri4\">日</phoneme>；鸡巴始终必须标为 <phoneme alphabet=\"py\" ph=\"ji1 ba3\">鸡巴</phoneme>；屌应标为 <phoneme alphabet=\"py\" ph=\"diao3\">屌</phoneme>。",
-    "SSML 使用规则：",
-    "1. 输出必须是完整、直接可提交给 CosyVoice 长文本语音合成的文本。",
-    "2. 输出必须只包含 SSML，不要解释，不要 Markdown 代码块，不要 JSON，不要额外标题。",
-    "3. 所有文本必须放在 <speak></speak> 标签内；不要在 <speak> 上指定 voice 属性。",
-    "4. 文本中的 XML 特殊字符必须转义：双引号用 &quot;，单引号用 &apos;，& 用 &amp;，< 用 &lt;，> 用 &gt;。",
-    "5. 可使用 <speak rate=\"...\" pitch=\"...\" volume=\"...\"> 控制整体语速、音高和音量。rate 与 pitch 的范围是 0.5 到 2，默认值是 1；volume 范围是 0 到 100，默认值是 50。",
-    "6. 普通中性文本不要在 <speak> 上输出 rate、pitch、volume 属性；严禁输出 rate=\"0\" 或 pitch=\"0\"。如果需要稍快语速可用 rate=\"1.1\" 到 rate=\"1.25\"，明显加快可用 rate=\"1.4\" 到 rate=\"1.7\"；如果需要稍慢语速可用 rate=\"0.85\" 到 rate=\"0.95\"。",
-    "7. 可使用 <break time=\"...\"/> 插入停顿。time 支持 50ms 到 10000ms，或 1s 到 10s。不要滥用无属性 <break/>，因为无属性停顿是 1 秒；普通标点不需要额外 break，常规停顿建议 100ms 到 300ms，戏剧性停顿才使用 500ms 到 900ms。",
-    "8. 必须使用 <phoneme alphabet=\"py\" ph=\"pin1 yin1\">文本</phoneme> 修正所有命中的中文读音风险，拼音和声调数字必须与文字一一对应。优先包裹完整词语，不要只包裹单个字导致上下文丢失。",
-    "9. 可使用 <say-as interpret-as=\"cardinal|digits|telephone|name|address|id|characters|punctuation|date|time|currency|measure\">文本</say-as> 控制数字、日期、电话、金额、单位等读法。",
-    "10. 可使用 <sub alias=\"替换读法\">原文</sub> 替换读法。",
-    "11. 可使用 <soundEvent src=\"URL\"/> 插入外部提示音，但只有在原文明确需要且 URL 合法时才使用。",
-    "12. 不要删除原文核心内容，不要新增情节，可以清理多余空白并添加合理停顿。",
-    "13. 最终输出必须以 <speak 开头，以 </speak> 结尾。"
+    "你的工作是接收用户输入的长篇小说文本，并在其中判断是否存在部分语气词，如果结合上下文，存在语气词，根据语气词插入语气词标签。",
+    "语气词标签有：",
+    "(laughs)（笑声）、(chuckle)（轻笑）、(coughs)（咳嗽）、(clear-throat)（清嗓子）、(groans)（呻吟）、(breath)（正常换气）、(pant)（喘气）、(inhale)（吸气）、(exhale)（呼气）、(gasps)（倒吸气）、(sniffs)（吸鼻子）、(sighs)（叹气）、(snorts)（喷鼻息）、(burps)（打嗝）、(lip-smacking)（咂嘴）、(humming)（哼唱）、(hissing)（嘶嘶声）、(emm)（嗯）、(whistles)（口哨）、(sneezes)（喷嚏）、(crying)（抽泣）、(applause)（鼓掌）",
+    "例如，用户输入：",
+    "“",
+    "崔砚文发出压抑的呻吟。",
+    "“啊……好久没人碰我了……翟帅……轻点……”",
+    "”",
+    "那么你修改后应为：",
+    "“",
+    "崔砚文发出压抑的呻吟。",
+    "“啊(groans)……好久没人碰我了(groans)……翟帅……轻点(groans)……”",
+    "”",
+    "你不要更改文章内容，但是可以适当根据上下文添加语气词标签，来达成更棒的效果，例如，用户输入：",
+    "\"",
+    "王天琳被前后夹击，身体很快就到了崩溃边缘。",
+    "“要去了……要去了……啊——！！！”",
+    "\"",
+    "你可以修改为：",
+    "\"",
+    "王天琳被前后夹击，身体很快就到了崩溃边缘。",
+    "“要去了(pant)……要去了(emm)(groans)……啊——！！！(exhale)(gasps)”",
+    "\"",
+    "或者用户输入：",
+    "\"",
+    "崔砚文被操得眼泪直流，声音却越来越浪：",
+    "“操我……用力操我……啊（呻吟）……干死我这个快饿死的骚逼吧(pant)……我好爽(emm)……要去了(groans)……要去了(groans)——！！！”",
+    "\"",
+    "注意，以上示例仅仅用于说明穿插时机，你应该总结经验融会贯通，而不是直接照搬匹配。",
+    "你的回答应该仅仅包含添加了语气词以后的完整内容，不要包含解释性内容。"
   ].join("\n");
 }
 
 function buildOptimizationPrompt(text) {
   return [
-    "请将下面的小说原文转换为完整 SSML。只输出 SSML，不要输出任何额外信息。",
-    "质量要求：输出前必须完成读音风险扫描。凡是原文中出现多音字、易错词、特殊词、角色名、人名、地名或粗俗词，都要尽量用 <phoneme> 标出正确读音。不要只添加 <break>。",
+    "请根据上下文给下面的小说原文添加合适的 MiniMax 语气词标签。只输出添加语气词后的完整内容，不要输出任何解释、标题、JSON 或 Markdown。",
+    "不要更改文章内容，不要新增情节，不要删除原文，只能在合适位置插入允许的语气词标签。",
     "",
     "<原文>",
     text,
@@ -339,91 +796,30 @@ function buildOptimizationPrompt(text) {
   ].join("\n");
 }
 
-function normalizeSsmlOutput(content, fallbackText) {
-  let ssml = stripCodeFence(String(content || "")).trim();
-  const firstSpeak = ssml.search(/<speak\b/i);
-  const lastSpeakEnd = ssml.toLowerCase().lastIndexOf("</speak>");
-
-  if (firstSpeak >= 0 && lastSpeakEnd >= firstSpeak) {
-    ssml = ssml.slice(firstSpeak, lastSpeakEnd + "</speak>".length).trim();
-  }
-
-  if (!/^<speak\b/i.test(ssml)) {
-    ssml = `<speak>${escapeXml(ssml || fallbackText)}</speak>`;
-  }
-
-  return normalizeCosyVoiceSsmlControls(ssml);
+function getXmlAttr(attrs, name) {
+  const pattern = new RegExp(`${name}\\s*=\\s*([\"'])(.*?)\\1`, "i");
+  const match = String(attrs || "").match(pattern);
+  return match ? unescapeXml(match[2]) : "";
 }
 
-function normalizeCosyVoiceSsmlControls(ssml) {
-  return ssml.replace(/<speak\b([^>]*)>/gi, (_tag, attrs) => {
-    const normalizedAttrs = attrs
-      .replace(/\srate=(["'])(.*?)\1/gi, (_match, quote, value) =>
-        normalizeCosyVoiceRatioAttr("rate", value, quote)
-      )
-      .replace(/\spitch=(["'])(.*?)\1/gi, (_match, quote, value) =>
-        normalizeCosyVoiceRatioAttr("pitch", value, quote)
-      )
-      .replace(/\svolume=(["'])(.*?)\1/gi, (_match, quote, value) =>
-        normalizeCosyVoiceVolumeAttr(value, quote)
-      );
-
-    return `<speak${normalizedAttrs}>`;
-  });
-}
-
-function normalizeCosyVoiceRatioAttr(name, value, quote) {
-  const normalized = normalizeCosyVoiceRatio(Number(value));
-  if (normalized === 1) {
-    return "";
-  }
-
-  return ` ${name}=${quote}${formatRatio(normalized)}${quote}`;
-}
-
-function normalizeCosyVoiceRatio(value) {
-  if (!Number.isFinite(value) || value === 0) {
-    return 1;
-  }
-
-  if (value >= 0.5 && value <= 2) {
-    return value;
-  }
-
-  if (value >= -500 && value <= 500) {
-    return value < 0 ? clampFloat(1 + value / 1000, 0.5, 2, 1) : clampFloat(1 + value / 500, 0.5, 2, 1);
-  }
-
-  return clampFloat(value, 0.5, 2, 1);
-}
-
-function normalizeCosyVoiceVolumeAttr(value, quote) {
-  const normalized = clampNumber(value, 0, 100, 50);
-  if (normalized === 50) {
-    return "";
-  }
-
-  return ` volume=${quote}${normalized}${quote}`;
-}
-
-function formatRatio(value) {
-  return Number(value.toFixed(2)).toString();
+function stripXmlTags(value) {
+  return String(value || "").replace(/<[^>]*>/g, "");
 }
 
 function stripCodeFence(value) {
   return value
-    .replace(/^```(?:xml|ssml)?\s*/i, "")
+    .replace(/^```(?:xml|ssml|text)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
 }
 
-function escapeXml(value) {
+function unescapeXml(value) {
   return String(value || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
 }
 
 function cleanText(value) {
@@ -462,14 +858,23 @@ function clampFloat(value, min, max, fallback) {
   return Math.max(min, Math.min(max, number));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function toErrorMessage(error) {
+  return error?.message || "Unknown error";
+}
+
 function corsHeaders(request, env) {
   const origin = request.headers.get("Origin") || "*";
   const allowedOrigin = env.ALLOWED_ORIGIN || env.DOUBAO_ALLOWED_ORIGIN || origin;
 
   return {
     "Access-Control-Allow-Origin": allowedOrigin,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Range",
+    "Access-Control-Expose-Headers": "Accept-Ranges, Content-Length, Content-Range, Content-Disposition",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin"
   };
@@ -482,6 +887,9 @@ function isAllowedOrigin(request, env) {
   }
 
   const origin = request.headers.get("Origin");
+  if (!origin) {
+    return true;
+  }
   return origin === allowedOrigin;
 }
 

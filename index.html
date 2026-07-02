@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="基于 DeepSeek 文本优化和阿里云 CosyVoice 长文本语音合成接口的网页。"
+      content="基于 DeepSeek 文本优化和 MiniMax 异步长文本语音合成接口的网页。"
     />
-    <title>CosyVoice 长文本语音合成工作台</title>
+    <title>MiniMax 长文本语音合成工作台</title>
     <link rel="stylesheet" href="styles.css" />
     <script src="config.js"></script>
     <script defer src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
@@ -26,15 +26,15 @@
             <span></span>
           </div>
           <div>
-            <p class="eyebrow">Alibaba CosyVoice</p>
+            <p class="eyebrow">MiniMax TTS</p>
             <h1>长文本语音合成工作台</h1>
           </div>
         </div>
 
         <div class="topbar-meta" aria-label="当前接口信息">
           <span class="status-dot"></span>
-          <span>HTTP 非实时合成</span>
-          <strong>cosyvoice-v3-plus</strong>
+          <span>异步长文本合成</span>
+          <strong id="currentModelLabel">speech-2.8-turbo</strong>
         </div>
       </header>
 
@@ -60,16 +60,16 @@
           <div class="text-surface">
             <textarea
               id="textInput"
-              maxlength="10000"
+              maxlength="50000"
               spellcheck="false"
-              placeholder="在这里粘贴要合成的文本，最多 10000 个字符。系统会先用 DeepSeek 转换为完整 SSML，再作为一次阿里云 CosyVoice 长文本合成请求提交。"
+              placeholder="在这里粘贴要合成的文本，最多 50000 个字符。系统会先用 DeepSeek 根据上下文添加 MiniMax 语气词标签，再创建异步语音合成任务。"
             ></textarea>
           </div>
 
           <div class="composer-footer">
             <div class="metric">
               <span id="charCount">0</span>
-              <small>/ 10000 字符</small>
+              <small>/ 50000 字符</small>
             </div>
             <div class="metric muted">
               <span id="illegalCount">0</span>
@@ -87,40 +87,49 @@
               </div>
             </div>
 
-            <label class="field">
-              <span>音色</span>
-              <select id="voiceSelect"></select>
-            </label>
+            <div class="voice-picker-row">
+              <label class="field">
+                <span>音色</span>
+                <select id="voiceSelect"></select>
+              </label>
+              <button
+                class="icon-button ghost hide-voice-button"
+                type="button"
+                id="hideVoiceButton"
+                title="隐藏当前音色"
+              >
+                <i data-lucide="eye-off" aria-hidden="true"></i>
+                <span>隐藏</span>
+              </button>
+            </div>
 
             <label class="field">
-              <span>自定义 voice</span>
-              <input
-                id="customVoice"
-                type="text"
-                inputmode="text"
-                placeholder="选择自定义音色时填写声音复刻或声音设计 voice ID"
-                autocomplete="off"
-              />
+              <span>模型</span>
+              <select id="ttsModel">
+                <option value="speech-2.8-turbo" selected>speech-2.8-turbo</option>
+                <option value="speech-2.8-hd">speech-2.8-hd</option>
+              </select>
             </label>
 
             <div class="two-col">
               <label class="field">
                 <span>采样率</span>
                 <select id="sampleRate">
-                  <option value="24000" selected>24000 Hz</option>
+                  <option value="32000" selected>32000 Hz</option>
+                  <option value="44100">44100 Hz</option>
+                  <option value="24000">24000 Hz</option>
                   <option value="22050">22050 Hz</option>
                   <option value="16000">16000 Hz</option>
                   <option value="8000">8000 Hz</option>
-                  <option value="44100">44100 Hz</option>
-                  <option value="48000">48000 Hz</option>
                 </select>
               </label>
 
               <label class="field">
                 <span>格式</span>
                 <select id="languageMode">
-                  <option value="wav" selected>WAV</option>
-                  <option value="mp3">MP3</option>
+                  <option value="mp3" selected>MP3</option>
+                  <option value="wav">WAV</option>
+                  <option value="flac">FLAC</option>
                   <option value="pcm">PCM</option>
                 </select>
               </label>
@@ -131,7 +140,7 @@
             <div class="section-heading compact">
               <div>
                 <p class="eyebrow">Tuning</p>
-                <h2>语速与音量</h2>
+                <h2>语速、声调与音量</h2>
               </div>
             </div>
 
@@ -141,9 +150,85 @@
             </label>
 
             <label class="range-field">
+              <span>声调 <strong id="pitchValue">0</strong></span>
+              <input id="pitch" type="range" min="-12" max="12" step="1" value="0" />
+            </label>
+
+            <label class="range-field">
               <span>音量 <strong id="loudnessValue">0</strong></span>
               <input id="loudness" type="range" min="-50" max="100" step="1" value="0" />
             </label>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-heading compact">
+              <div>
+                <p class="eyebrow">Effect</p>
+                <h2>声音效果器</h2>
+              </div>
+            </div>
+
+            <label class="range-field">
+              <span>低沉 / 明亮 <strong id="effectPitchValue">0</strong></span>
+              <input id="effectPitch" type="range" min="-100" max="100" step="1" value="0" />
+            </label>
+
+            <label class="range-field">
+              <span>刚劲 / 柔和 <strong id="effectIntensityValue">0</strong></span>
+              <input id="effectIntensity" type="range" min="-100" max="100" step="1" value="0" />
+            </label>
+
+            <label class="range-field">
+              <span>浑厚 / 清脆 <strong id="effectTimbreValue">0</strong></span>
+              <input id="effectTimbre" type="range" min="-100" max="100" step="1" value="0" />
+            </label>
+
+            <p class="microcopy">效果器仅在 MP3、WAV、FLAC 格式下提交。</p>
+          </section>
+
+          <section class="panel-section">
+            <details class="settings-details" id="advancedSettings">
+              <summary>
+                <span>
+                  <i data-lucide="settings-2" aria-hidden="true"></i>
+                  设置
+                </span>
+                <strong id="hiddenVoiceCount">0 个隐藏</strong>
+              </summary>
+
+              <div class="settings-body">
+                <div class="settings-block">
+                  <div class="settings-block-heading">
+                    <div>
+                      <p class="eyebrow">Hidden voices</p>
+                      <h2>已隐藏音色</h2>
+                    </div>
+                  </div>
+                  <div class="hidden-voice-list" id="hiddenVoiceList"></div>
+                </div>
+
+                <div class="settings-block">
+                  <div class="settings-block-heading">
+                    <div>
+                      <p class="eyebrow">Pronunciation</p>
+                      <h2>读音规则</h2>
+                    </div>
+                  </div>
+
+                  <label class="field">
+                    <span>pronunciation_dict.tone</span>
+                    <textarea
+                      class="mini-textarea"
+                      id="pronunciationRules"
+                      spellcheck="false"
+                      placeholder="每行一条，例如：&#10;燕少飞/(yan4)(shao3)(fei1)&#10;omg/oh my god"
+                    ></textarea>
+                  </label>
+
+                  <p class="microcopy">中文声调用数字表示：1 一声，2 二声，3 三声，4 四声，5 轻声。规则会保存在当前浏览器。</p>
+                </div>
+              </div>
+            </details>
           </section>
 
           <section class="panel-section">
@@ -165,7 +250,7 @@
             </label>
 
             <p class="microcopy">
-              百炼 HTTP 合成必须通过 Worker 代理。DeepSeek API Key 和 DashScope API Key 只保存在
+              MiniMax 异步合成必须通过 Worker 代理。DeepSeek API Key 和 MiniMax API Key 只保存在
               Cloudflare Worker Secrets 中。
             </p>
           </section>
@@ -178,7 +263,7 @@
             <span class="status-indicator" id="statusIndicator"></span>
             <div>
               <strong id="statusTitle">准备就绪</strong>
-              <p id="statusDetail">输入文本并选择音色后，可以开始优化并流式合成。</p>
+              <p id="statusDetail">输入文本并选择音色后，可以开始优化并创建异步合成任务。</p>
             </div>
           </div>
           <div class="progress-track" aria-hidden="true">

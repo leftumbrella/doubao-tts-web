@@ -11,9 +11,7 @@ cd /d "%PROJECT_DIR%"
 if not exist ".dev.vars" (
   echo Creating .dev.vars template...
   > ".dev.vars" echo DEEPSEEK_API_KEY=your_deepseek_api_key
-  >> ".dev.vars" echo DASHSCOPE_API_KEY=your_dashscope_api_key
-  >> ".dev.vars" echo DASHSCOPE_WORKSPACE_ID=
-  >> ".dev.vars" echo DASHSCOPE_TTS_MODEL=cosyvoice-v3-plus
+  >> ".dev.vars" echo MINIMAX_API_KEY=your_minimax_api_key
   >> ".dev.vars" echo ALLOWED_ORIGIN=http://localhost:%FRONTEND_PORT%
   echo.
   echo Please fill .dev.vars with your real API keys, then run this script again.
@@ -47,12 +45,12 @@ if not defined PY_CMD (
 )
 
 echo Starting Cloudflare Worker on http://localhost:%WORKER_PORT%
-start "CosyVoice TTS Worker" /D "%PROJECT_DIR%" cmd /k npx --yes wrangler dev worker/doubao-tts-proxy.js --local --port %WORKER_PORT%
+start "MiniMax TTS Worker" /D "%PROJECT_DIR%" cmd /k npx --yes wrangler dev worker/doubao-tts-proxy.js --local --port %WORKER_PORT%
 
 timeout /t 5 /nobreak >nul
 
 echo Starting frontend on http://localhost:%FRONTEND_PORT%
-start "CosyVoice TTS Frontend" /D "%PROJECT_DIR%" cmd /k %PY_CMD% -m http.server %FRONTEND_PORT%
+start "MiniMax TTS Frontend" /D "%PROJECT_DIR%" cmd /k %PY_CMD% -m http.server %FRONTEND_PORT%
 
 timeout /t 2 /nobreak >nul
 
