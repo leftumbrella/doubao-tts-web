@@ -1,14 +1,14 @@
-# 豆包长文本语音合成工作台
+# CosyVoice 长文本语音合成工作台
 
-这是一个可以部署到 GitHub Pages 的静态网页，用豆包语音合成大模型 2.0 的长文本异步接口完成语音合成。
+这是一个可以部署到 GitHub Pages 的静态网页。前端先把长文本交给 DeepSeek 转换为完整 SSML，然后把这份 SSML 作为一次阿里云 CosyVoice 长文本语音合成请求提交，最后使用阿里云返回的音频 URL 播放和下载。
 
 ## 功能
 
-- 长文本输入框，支持直接粘贴，单次最多 100000 字符。
-- 音色下拉框，内置 `seed-tts-2.0` 中文女声音色列表，并支持自定义音色 ID。
-- 调用 `/api/v3/tts/submit` 提交任务，再轮询 `/api/v3/tts/query`。
-- 合成完成后显示音频控制条，支持播放、复制音频链接和下载。
-- 默认输出 MP3，支持采样率、语速、音量和语种参数。
+- 长文本输入框，支持直接粘贴，单次最多 10000 字符。
+- 使用 `cosyvoice-v3-plus`，默认提供系统音色，也可填写声音复刻或声音设计的自定义 `voice`。
+- DeepSeek 生成的 SSML 会在页面底部展示。
+- TTS 使用阿里云百炼 DashScope 非实时 CosyVoice HTTP API。
+- 非流式返回音频文件 URL，有效期约 24 小时，页面支持播放和下载。
 
 ## GitHub Pages 部署
 
@@ -17,51 +17,108 @@
 3. 在 `Build and deployment` 中选择 `GitHub Actions`。
 4. 推送后会自动运行 `.github/workflows/pages.yml` 并发布页面。
 
-## 调用方式
+## Cloudflare Worker 部署
 
-页面支持两种方式。
+前端不能直接保存 DeepSeek API Key 或 DashScope API Key，必须通过 Worker 代理。
 
-### 方式一：临时浏览器直连
-
-在页面的“接口连接”里填写 `App ID` 和 `Access Key`。这些值只保存在当前浏览器中，不会写进仓库。
-
-注意：公开部署时不建议这样使用，因为浏览器请求可能被 CORS 拦截，而且访问者可以看到自己输入的凭据。
-
-### 方式二：安全代理
-
-推荐公开部署时使用 `worker/doubao-tts-proxy.js`。它会把密钥保存在 Cloudflare Worker 环境变量中，GitHub Pages 只调用代理地址。
-
-Cloudflare Worker 需要配置：
+部署 Worker：
 
 ```bash
-wrangler secret put DOUBAO_APP_ID
-wrangler secret put DOUBAO_ACCESS_KEY
-wrangler secret put DOUBAO_RESOURCE_ID
-wrangler secret put DOUBAO_ALLOWED_ORIGIN
+npx wrangler deploy worker/doubao-tts-proxy.js \
+  --name doubao-tts-proxy \
+  --compatibility-date 2026-07-02
+```
+
+配置生产密钥：
+
+```bash
+npx wrangler secret put DEEPSEEK_API_KEY --name doubao-tts-proxy
+npx wrangler secret put DASHSCOPE_API_KEY --name doubao-tts-proxy
+npx wrangler secret put DASHSCOPE_WORKSPACE_ID --name doubao-tts-proxy
+npx wrangler secret put DASHSCOPE_TTS_MODEL --name doubao-tts-proxy
+npx wrangler secret put ALLOWED_ORIGIN --name doubao-tts-proxy
 ```
 
 推荐值：
 
 ```text
-DOUBAO_RESOURCE_ID=seed-tts-2.0
-DOUBAO_ALLOWED_ORIGIN=https://你的用户名.github.io
+DASHSCOPE_API_KEY=你的阿里云百炼 API Key
+DASHSCOPE_WORKSPACE_ID=你的百炼业务空间 ID，可选；留空时使用 dashscope.aliyuncs.com
+DASHSCOPE_TTS_MODEL=cosyvoice-v3-plus
+ALLOWED_ORIGIN=https://你的用户名.github.io
 ```
+
+如果你的 GitHub Pages 地址是：
+
+```text
+https://leftumbrella.github.io/doubao-tts-web/
+```
+
+`ALLOWED_ORIGIN` 应填：
+
+```text
+https://leftumbrella.github.io
+```
+
+不要带 `/doubao-tts-web/` 路径。
+
+## 前端代理地址
 
 部署 Worker 后，把 `config.js` 里的 `proxyUrl` 改为 Worker 地址：
 
 ```js
-window.DOUBAO_TTS_CONFIG = {
-  proxyUrl: "https://your-worker.example.workers.dev",
-  resourceId: "seed-tts-2.0"
+window.ALIYUN_TTS_CONFIG = {
+  proxyUrl: "https://doubao-tts-proxy.lefthhau.workers.dev"
 };
 ```
 
-## 豆包接口说明
+## 后端路由
 
-本项目使用长文本异步接口：
+Worker 暴露两个路由：
 
-- 提交任务：`https://openspeech.bytedance.com/api/v3/tts/submit`
-- 查询任务：`https://openspeech.bytedance.com/api/v3/tts/query`
-- 资源 ID：`seed-tts-2.0`
+- `POST /optimize`：调用 DeepSeek，把长文本转换为可提交给 CosyVoice 的 SSML。
+- `POST /stream`：调用阿里云百炼 CosyVoice HTTP API，返回 NDJSON 格式的音频 URL 事件。
 
-音频链接由 query 接口返回，通常 1 小时内有效。服务端合成数据按官方说明可保存 7 天。
+## 本地测试
+
+Windows 可以直接双击：
+
+```text
+start-local-test.bat
+```
+
+脚本会启动本地 Worker、前端静态服务器，并自动打开：
+
+```text
+http://localhost:5173/?proxy=http%3A%2F%2Flocalhost%3A8787
+```
+
+首次运行时，如果 `.dev.vars` 不存在，脚本会创建模板并用记事本打开。填入真实密钥后再运行一次。
+
+本地 `.dev.vars` 示例：
+
+```env
+DEEPSEEK_API_KEY=你的DeepSeek API Key
+DASHSCOPE_API_KEY=你的阿里云百炼 API Key
+DASHSCOPE_WORKSPACE_ID=你的百炼业务空间 ID，可选
+DASHSCOPE_TTS_MODEL=cosyvoice-v3-plus
+ALLOWED_ORIGIN=http://localhost:5173
+```
+
+启动前端：
+
+```bash
+python3 -m http.server 5173
+```
+
+启动 Worker：
+
+```bash
+npx wrangler dev worker/doubao-tts-proxy.js --local --port 8787
+```
+
+本地页面代理地址填：
+
+```text
+http://localhost:8787
+```

@@ -538,10 +538,81 @@ input[type="range"] {
   transition: width 220ms ease;
 }
 
-.audio-result {
+.audio-result,
+.deepseek-output {
   min-width: min(520px, 100%);
   grid-column: 1 / -1;
   padding-top: 2px;
+}
+
+.deepseek-output {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #faf7f0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.deepseek-output summary {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px;
+  cursor: pointer;
+  color: var(--ink-soft);
+  font-weight: 800;
+}
+
+.deepseek-output summary strong {
+  color: var(--teal-dark);
+  font-variant-numeric: tabular-nums;
+}
+
+.deepseek-list {
+  max-height: 280px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  padding: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.deepseek-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper-strong);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.deepseek-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.deepseek-meta span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: #f7f3ea;
+}
+
+.deepseek-item p {
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  line-height: 1.6;
+}
+
+.deepseek-item .instruction {
+  color: var(--teal-dark);
+  font-weight: 700;
 }
 
 audio {

@@ -1,11 +1,10 @@
-const SUBMIT_URL = "https://openspeech.bytedance.com/api/v3/tts/submit";
-const QUERY_URL = "https://openspeech.bytedance.com/api/v3/tts/query";
-const SUCCESS_CODE = 20000000;
-const MAX_TEXT_LENGTH = 100000;
+const MAX_TEXT_LENGTH = 10000;
+const MAX_ALIYUN_TTS_CHARS = 10000;
+const TTS_MODEL = "cosyvoice-v3-plus";
 
-const config = window.DOUBAO_TTS_CONFIG || {};
+const config = window.ALIYUN_TTS_CONFIG || window.DOUBAO_TTS_CONFIG || {};
 
-const voices = [
+const doubaoVoices = [
   ["通用场景", "Vivi 2.0", "zh_female_vv_uranus_bigtts"],
   ["通用场景", "小何 2.0", "zh_female_xiaohe_uranus_bigtts"],
   ["通用场景", "魅力苏菲 2.0", "zh_female_sophie_uranus_bigtts"],
@@ -115,6 +114,12 @@ const voices = [
   ["客服场景", "轻盈朵朵 2.0", "ICL_uranus_zh_female_qingyingduoduo_tob"]
 ].map(([scene, label, value]) => ({ label, value, scene }));
 
+const voices = [
+  ["系统音色", "龙安洋 · 阳光大男孩", "longanyang"],
+  ["系统音色", "龙安欢 · 欢脱元气女", "longanhuan"],
+  ["自定义音色", "使用下方自定义 voice", ""]
+].map(([scene, label, value]) => ({ label, value, scene }));
+
 const els = {
   textInput: document.querySelector("#textInput"),
   pasteButton: document.querySelector("#pasteButton"),
@@ -128,8 +133,6 @@ const els = {
   speechRateValue: document.querySelector("#speechRateValue"),
   loudnessValue: document.querySelector("#loudnessValue"),
   proxyUrl: document.querySelector("#proxyUrl"),
-  appId: document.querySelector("#appId"),
-  accessKey: document.querySelector("#accessKey"),
   charCount: document.querySelector("#charCount"),
   illegalCount: document.querySelector("#illegalCount"),
   statusIndicator: document.querySelector("#statusIndicator"),
@@ -141,7 +144,10 @@ const els = {
   audioResult: document.querySelector("#audioResult"),
   audioPlayer: document.querySelector("#audioPlayer"),
   downloadLink: document.querySelector("#downloadLink"),
-  copyUrlButton: document.querySelector("#copyUrlButton")
+  copyUrlButton: document.querySelector("#copyUrlButton"),
+  deepseekOutput: document.querySelector("#deepseekOutput"),
+  deepseekCount: document.querySelector("#deepseekCount"),
+  deepseekList: document.querySelector("#deepseekList")
 };
 
 let activeRun = null;
@@ -168,18 +174,24 @@ function fillVoiceOptions() {
 }
 
 function restoreSettings() {
-  const get = (key, fallback = "") => localStorage.getItem(key) || fallback;
+  const get = (key, fallback = "", legacyKey = "") =>
+    localStorage.getItem(key) || (legacyKey ? localStorage.getItem(legacyKey) : "") || fallback;
+  const urlProxy = new URLSearchParams(window.location.search).get("proxy");
 
-  els.proxyUrl.value = get("doubao.proxyUrl", config.proxyUrl || "");
-  els.appId.value = get("doubao.appId");
-  els.accessKey.value = sessionStorage.getItem("doubao.accessKey") || "";
-  els.customVoice.value = get("doubao.customVoice");
-  els.sampleRate.value = get("doubao.sampleRate", "24000");
-  els.languageMode.value = get("doubao.languageMode", "auto");
-  els.speechRate.value = get("doubao.speechRate", "0");
-  els.loudness.value = get("doubao.loudness", "0");
+  els.proxyUrl.value = urlProxy || config.proxyUrl || get("aliyun.proxyUrl", "", "doubao.proxyUrl");
+  els.customVoice.value = get("aliyun.customVoice", "", "doubao.customVoice");
+  els.sampleRate.value = get("aliyun.sampleRate", "24000", "doubao.sampleRate");
+  els.languageMode.value = get("aliyun.format", "wav");
+  els.speechRate.value = get("aliyun.speechRate", "0", "doubao.speechRate");
+  els.loudness.value = get("aliyun.volume", "0", "doubao.loudness");
+  if (!["8000", "16000", "22050", "24000", "44100", "48000"].includes(els.sampleRate.value)) {
+    els.sampleRate.value = "24000";
+  }
+  if (!["wav", "mp3", "pcm"].includes(els.languageMode.value)) {
+    els.languageMode.value = "wav";
+  }
 
-  const savedVoice = get("doubao.voice");
+  const savedVoice = get("aliyun.voice", "", "doubao.voice");
   if (savedVoice && voices.some((voice) => voice.value === savedVoice)) {
     els.voiceSelect.value = savedVoice;
   }
@@ -190,13 +202,11 @@ function bindEvents() {
   els.pasteButton.addEventListener("click", pasteFromClipboard);
   els.clearButton.addEventListener("click", clearText);
   els.synthesizeButton.addEventListener("click", synthesize);
-  els.stopButton.addEventListener("click", stopPolling);
+  els.stopButton.addEventListener("click", stopSynthesis);
   els.copyUrlButton.addEventListener("click", copyAudioUrl);
 
   [
     els.proxyUrl,
-    els.appId,
-    els.accessKey,
     els.customVoice,
     els.voiceSelect,
     els.sampleRate,
@@ -222,7 +232,7 @@ async function pasteFromClipboard() {
   try {
     const clipboardText = await navigator.clipboard.readText();
     insertAtSelection(clipboardText);
-    setStatus("ready", "已粘贴文本", "请检查文本内容和音色设置。");
+    setStatus("ready", "已粘贴文本", "DeepSeek 会在合成前转换为完整 SSML。");
   } catch (error) {
     els.textInput.focus();
     setStatus("warning", "剪贴板权限被浏览器拦截", "请使用系统粘贴快捷键。");
@@ -261,45 +271,76 @@ async function synthesize() {
   saveSettings();
   setBusy(true);
   resetAudio();
+  resetDeepSeekOutput();
 
   const controller = new AbortController();
   activeRun = { controller, stopped: false };
 
   try {
-    setStatus("running", "正在提交合成任务", "使用豆包语音合成大模型 2.0 长文本异步接口。");
-    setProgress(8);
+    const proxyUrl = requireProxyUrl();
+    const speaker = resolveVoice();
+    setStatus("running", "DeepSeek 正在生成 SSML", "正在将长文本转换为可直接提交 CosyVoice 的 SSML。");
+    setProgress(4);
 
-    const submitBody = buildSubmitBody(text);
-    const submitResult = await requestDoubao("submit", submitBody, controller.signal);
-    assertSuccess(submitResult.payload, "submit");
+    const optimizeResult = await optimizeSsml(proxyUrl, text, controller.signal);
+    const ssml = optimizeResult.ssml;
+    if (!ssml) {
+      throw new Error("DeepSeek 没有返回可合成的 SSML。");
+    }
+    renderDeepSeekOutput(ssml, optimizeResult.meta);
+    setProgress(24);
 
-    const taskId = submitResult.payload?.data?.task_id;
-    if (!taskId) {
-      throw new Error("submit 成功但没有返回 task_id。");
+    const sampleRate = Number(els.sampleRate.value);
+    const audioFormat = els.languageMode.value;
+    const ttsTextLength = countSsmlText(ssml);
+    if (ttsTextLength > MAX_ALIYUN_TTS_CHARS) {
+      throw new Error(
+        `阿里云 CosyVoice 长文本单次最多 ${MAX_ALIYUN_TTS_CHARS} 字符，DeepSeek 整理后正文为 ${ttsTextLength} 字符。`
+      );
     }
 
     setStatus(
       "running",
-      "任务已提交，正在轮询结果",
-      `Task ID: ${taskId}${submitResult.logId ? `，Log ID: ${submitResult.logId}` : ""}`
+      "正在调用阿里云 CosyVoice 长文本合成",
+      `将 DeepSeek 生成的 SSML 作为 1 次请求提交，正文 ${ttsTextLength} 字符。`
     );
-    setProgress(18);
+    setProgress(28);
 
-    const queryPayload = await pollTask(taskId, controller.signal);
-    const data = queryPayload.data || {};
-    if (!data.audio_url) {
-      throw new Error("任务已完成，但 query 响应中没有 audio_url。");
+    const speechResult = await streamLongText(
+      proxyUrl,
+      {
+        ssml,
+        voice: speaker,
+        model: TTS_MODEL,
+        format: audioFormat,
+        sample_rate: sampleRate,
+        volume: mapAliyunVolume(Number(els.loudness.value)),
+        rate: mapDashScopeRate(Number(els.speechRate.value)),
+        pitch: 1,
+        enable_ssml: true
+      },
+      controller.signal,
+      (event) => {
+        if (event.type === "url") {
+          setProgress(96);
+        }
+      }
+    );
+
+    if (!speechResult.url) {
+      throw new Error("语音合成完成但没有返回音频 URL。");
     }
 
-    showAudio(data.audio_url, taskId);
-    const lengthInfo = data.synthesize_text_length
-      ? `实际合成 ${data.synthesize_text_length} 字符。`
-      : "合成完成。";
-    setStatus("success", "合成完成", `${lengthInfo} 音频链接通常 1 小时内有效。`);
+    showAudio(speechResult.url, `${TTS_MODEL}-${Date.now()}.${audioFormat}`);
+    setStatus(
+      "success",
+      "合成完成",
+      `已通过 ${TTS_MODEL} 生成音频 URL，有效期约 24 小时。`
+    );
     setProgress(100);
   } catch (error) {
     if (error.name === "AbortError" || activeRun?.stopped) {
-      setStatus("warning", "已停止轮询", "服务端任务不会因此取消。如需结果，可以稍后用 task_id 再查。");
+      setStatus("warning", "已停止合成", "当前请求已取消，已生成的临时音频没有保存。");
       setProgress(0);
     } else {
       setStatus("error", "合成失败", toErrorMessage(error));
@@ -311,134 +352,110 @@ async function synthesize() {
   }
 }
 
-function buildSubmitBody(text) {
-  const speaker = els.customVoice.value.trim() || els.voiceSelect.value;
-  const additions = {};
-  const languageMode = els.languageMode.value;
+async function optimizeSsml(proxyUrl, text, signal) {
+  const response = await fetch(`${proxyUrl}/optimize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+    signal
+  });
 
-  if (languageMode === "auto") {
-    additions.enable_language_detector = true;
-  } else {
-    additions.explicit_language = languageMode;
+  const payload = await safeResponseJson(response);
+  if (!response.ok) {
+    throw new Error(payload?.message || `DeepSeek optimization failed: HTTP ${response.status}`);
   }
 
   return {
-    user: {
-      uid: "github-pages-user"
-    },
-    unique_id: cryptoRandomId(),
-    namespace: "BidirectionalTTS",
-    req_params: {
-      text,
-      speaker,
-      audio_params: {
-        format: "mp3",
-        sample_rate: Number(els.sampleRate.value),
-        speech_rate: Number(els.speechRate.value),
-        loudness_rate: Number(els.loudness.value)
-      },
-      additions: JSON.stringify(additions)
-    }
+    ssml: String(payload.ssml || "").trim(),
+    meta: payload.meta || null
   };
 }
 
-async function pollTask(taskId, signal) {
-  const startedAt = Date.now();
-  const timeoutMs = 10 * 60 * 1000;
-  let attempt = 0;
-
-  while (Date.now() - startedAt < timeoutMs) {
-    attempt += 1;
-    await delay(attempt < 8 ? 2500 : 5000, signal);
-
-    const queryResult = await requestDoubao("query", { task_id: taskId }, signal);
-    assertSuccess(queryResult.payload, "query");
-
-    const data = queryResult.payload.data || {};
-    const status = data.task_status;
-
-    if (status === 2) {
-      setProgress(96);
-      return queryResult.payload;
-    }
-
-    if (status === 3) {
-      throw new Error(queryResult.payload.message || "任务处理失败。");
-    }
-
-    const progress = Math.min(92, 18 + attempt * 4);
-    setProgress(progress);
-    setStatus(
-      "running",
-      "任务处理中",
-      `第 ${attempt} 次查询，已处理 ${data.synthesize_text_length || 0} / ${
-        data.req_text_length || "?"
-      } 字符。`
-    );
-  }
-
-  throw new Error("轮询超过 10 分钟仍未完成。长文本可能还在处理，请稍后重新查询。");
-}
-
-async function requestDoubao(kind, body, signal) {
-  const proxyUrl = normalizeProxyUrl(els.proxyUrl.value.trim());
-  const useProxy = Boolean(proxyUrl);
-  const url = useProxy ? `${proxyUrl}/${kind}` : kind === "submit" ? SUBMIT_URL : QUERY_URL;
-  const headers = {
-    "Content-Type": "application/json"
-  };
-
-  if (!useProxy) {
-    const appId = els.appId.value.trim();
-    const accessKey = els.accessKey.value.trim();
-    if (!appId || !accessKey) {
-      throw new Error("请填写代理地址，或临时输入 App ID 与 Access Key。");
-    }
-
-    headers["X-Api-App-Id"] = appId;
-    headers["X-Api-Access-Key"] = accessKey;
-    headers["X-Api-Resource-Id"] = config.resourceId || "seed-tts-2.0";
-    headers["X-Api-Request-Id"] = cryptoRandomId();
-  }
-
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal
-    });
-  } catch (error) {
-    if (error.name === "AbortError") {
-      throw error;
-    }
-
-    throw new Error(
-      "请求没有到达接口。若你在 GitHub Pages 上直连豆包接口，可能被浏览器 CORS 拦截，请配置代理地址。"
-    );
-  }
-
-  const text = await response.text();
-  const payload = safeJson(text);
-  const logId = response.headers.get("X-Tt-Logid") || "";
+async function streamLongText(proxyUrl, body, signal, onEvent) {
+  const response = await fetch(`${proxyUrl}/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal
+  });
 
   if (!response.ok) {
-    const message = payload?.message || text || `HTTP ${response.status}`;
-    throw new Error(message);
+    const payload = await safeResponseJson(response);
+    throw new Error(payload?.message || `DashScope CosyVoice request failed: HTTP ${response.status}`);
   }
 
-  return { payload, logId };
+  if (!response.body) {
+    throw new Error("当前浏览器不支持读取流式响应。");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const result = {
+    url: "",
+    expiresAt: null,
+    requestId: "",
+    usage: null
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = safeJson(line);
+      if (!event) continue;
+      if (event.type === "error") {
+        throw new Error(event.message || "DashScope CosyVoice returned an error.");
+      }
+      if (event.type === "url" && event.url) {
+        result.url = event.url;
+        result.expiresAt = event.expires_at || null;
+        result.requestId = event.request_id || "";
+        result.usage = event.usage || null;
+      }
+      onEvent?.(event);
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    const event = safeJson(buffer.trim());
+    if (event?.type === "error") {
+      throw new Error(event.message || "DashScope CosyVoice returned an error.");
+    }
+    if (event?.type === "url" && event.url) {
+      result.url = event.url;
+      result.expiresAt = event.expires_at || null;
+      result.requestId = event.request_id || "";
+      result.usage = event.usage || null;
+    }
+    onEvent?.(event);
+  }
+
+  return result;
 }
 
-function assertSuccess(payload, stage) {
-  if (!payload) {
-    throw new Error(`${stage} 返回了空响应。`);
-  }
+function countSsmlText(ssml) {
+  return ssml.replace(/<[^>]*>/g, "").length;
+}
 
-  if (payload.code !== SUCCESS_CODE) {
-    throw new Error(`${payload.message || "接口返回错误"}（code: ${payload.code || "unknown"}）`);
+function mapDashScopeRate(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 1;
+  if (number < 0) {
+    return Math.max(0.5, 1 + number / 100);
   }
+  return Math.min(2, 1 + number / 100);
+}
+
+function mapAliyunVolume(value) {
+  return clampNumber(Number(value) + 50, 0, 100, 50);
 }
 
 function validateText(text) {
@@ -477,8 +494,8 @@ function countIllegalControls(text) {
 }
 
 function updateRangeLabels() {
-  els.speechRateValue.textContent = els.speechRate.value;
-  els.loudnessValue.textContent = els.loudness.value;
+  els.speechRateValue.textContent = `${mapDashScopeRate(Number(els.speechRate.value)).toFixed(2)}x`;
+  els.loudnessValue.textContent = String(mapAliyunVolume(Number(els.loudness.value)));
 }
 
 function setBusy(isBusy) {
@@ -486,7 +503,7 @@ function setBusy(isBusy) {
   els.stopButton.disabled = !isBusy;
 }
 
-function stopPolling() {
+function stopSynthesis() {
   if (!activeRun) {
     return;
   }
@@ -494,16 +511,24 @@ function stopPolling() {
   activeRun.controller.abort();
 }
 
-function showAudio(audioUrl, taskId) {
+function showAudio(audioUrl, fileName) {
+  if (latestAudioUrl?.startsWith("blob:")) {
+    URL.revokeObjectURL(latestAudioUrl);
+  }
+
   latestAudioUrl = audioUrl;
   els.audioPlayer.src = audioUrl;
   els.downloadLink.href = audioUrl;
-  els.downloadLink.download = `doubao-tts-${taskId}.mp3`;
+  els.downloadLink.download = fileName;
   els.downloadLink.removeAttribute("aria-disabled");
   els.audioResult.hidden = false;
 }
 
 function resetAudio() {
+  if (latestAudioUrl?.startsWith("blob:")) {
+    URL.revokeObjectURL(latestAudioUrl);
+  }
+
   latestAudioUrl = "";
   els.audioPlayer.removeAttribute("src");
   els.audioPlayer.load();
@@ -512,15 +537,45 @@ function resetAudio() {
   els.audioResult.hidden = true;
 }
 
+function resetDeepSeekOutput() {
+  els.deepseekOutput.hidden = true;
+  els.deepseekOutput.open = false;
+  els.deepseekCount.textContent = "0 字";
+  els.deepseekList.innerHTML = "";
+}
+
+function renderDeepSeekOutput(ssml, meta) {
+  els.deepseekOutput.hidden = false;
+  els.deepseekCount.textContent = `${countSsmlText(ssml)} 字`;
+  els.deepseekList.innerHTML = `
+    <article class="deepseek-item">
+      <div class="deepseek-meta">
+        <span>SSML</span>
+        <span>${escapeHtml(meta?.model || "deepseek")}</span>
+        <span>${escapeHtml(String(ssml.length))} 字符含标签</span>
+        <span>${escapeHtml(String(meta?.phoneme_count ?? 0))} 个读音修正</span>
+        <span>${escapeHtml(String(meta?.break_count ?? 0))} 个停顿</span>
+      </div>
+      <pre class="instruction">${escapeHtml(ssml)}</pre>
+    </article>
+  `;
+}
+
 async function copyAudioUrl() {
   if (!latestAudioUrl) {
     return;
   }
+
+  if (latestAudioUrl.startsWith("blob:")) {
+    setStatus("warning", "当前音频是本地生成的 Blob", "请使用下载按钮保存音频文件，Blob 链接不能分享。");
+    return;
+  }
+
   try {
     await navigator.clipboard.writeText(latestAudioUrl);
-    setStatus("success", "音频链接已复制", "链接有过期时间，失效后需要重新 query。");
+    setStatus("success", "已复制音频链接", "该链接由 DashScope 返回，通常 24 小时内有效。");
   } catch (error) {
-    setStatus("warning", "无法自动复制", "请从下载按钮打开后复制地址。");
+    setStatus("warning", "复制失败", "浏览器没有授予剪贴板权限，可以手动复制播放器地址。");
   }
 }
 
@@ -547,35 +602,46 @@ function setProgress(value) {
 }
 
 function saveSettings() {
-  localStorage.setItem("doubao.proxyUrl", els.proxyUrl.value.trim());
-  localStorage.setItem("doubao.appId", els.appId.value.trim());
-  localStorage.setItem("doubao.customVoice", els.customVoice.value.trim());
-  localStorage.setItem("doubao.voice", els.voiceSelect.value);
-  localStorage.setItem("doubao.sampleRate", els.sampleRate.value);
-  localStorage.setItem("doubao.languageMode", els.languageMode.value);
-  localStorage.setItem("doubao.speechRate", els.speechRate.value);
-  localStorage.setItem("doubao.loudness", els.loudness.value);
-  sessionStorage.setItem("doubao.accessKey", els.accessKey.value.trim());
+  localStorage.setItem("aliyun.proxyUrl", els.proxyUrl.value.trim());
+  localStorage.setItem("aliyun.customVoice", els.customVoice.value.trim());
+  localStorage.setItem("aliyun.voice", els.voiceSelect.value);
+  localStorage.setItem("aliyun.sampleRate", els.sampleRate.value);
+  localStorage.setItem("aliyun.format", els.languageMode.value);
+  localStorage.setItem("aliyun.speechRate", els.speechRate.value);
+  localStorage.setItem("aliyun.volume", els.loudness.value);
   updateRangeLabels();
 }
 
-function delay(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(new DOMException("Aborted", "AbortError"));
-      return;
-    }
+function requireProxyUrl() {
+  const proxyUrl = normalizeProxyUrl(els.proxyUrl.value.trim());
+  if (!proxyUrl) {
+    throw new Error("阿里云长文本合成必须通过 Worker 代理调用，请填写代理地址。");
+  }
+  return proxyUrl;
+}
 
-    const timeout = window.setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timeout);
-        reject(new DOMException("Aborted", "AbortError"));
-      },
-      { once: true }
-    );
-  });
+function resolveVoice() {
+  const selectedVoice = els.voiceSelect.value.trim();
+  if (selectedVoice) {
+    return selectedVoice;
+  }
+
+  const customVoice = els.customVoice.value.trim();
+  if (!customVoice) {
+    throw new Error("请选择系统音色，或在“自定义 voice”中填写声音复刻/声音设计音色 ID。");
+  }
+  return customVoice;
+}
+
+async function safeResponseJson(response) {
+  const text = await response.text();
+  return safeJson(text) || { message: text };
+}
+
+function throwIfStopped(signal) {
+  if (signal.aborted) {
+    throw new DOMException("Aborted", "AbortError");
+  }
 }
 
 function normalizeProxyUrl(value) {
@@ -588,6 +654,12 @@ function safeJson(text) {
   } catch (error) {
     return null;
   }
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(number)));
 }
 
 function cryptoRandomId() {
